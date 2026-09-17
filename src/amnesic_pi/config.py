@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-import re
-
 
 _IFACE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
 
