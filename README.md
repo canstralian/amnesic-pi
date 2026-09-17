@@ -1,5 +1,9 @@
 # Amnesic Pi
 
+<p align="center">
+  <img src="assets/amnesic-pi-logo.jpg" alt="Amnesic Pi logo" width="512">
+</p>
+
 **Fail-closed ARM64 Tor gateway for Raspberry Pi with an ephemeral OverlayFS runtime.**
 
 Amnesic Pi is an experimental Raspberry Pi security appliance. It combines Raspberry Pi OS Lite ARM64, Tor, nftables, systemd ordering, and Raspberry Pi's RAM-backed OverlayFS to create a small gateway where downstream TCP traffic is transparently routed through Tor and ordinary runtime filesystem changes disappear after reboot.
