@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 from .config import ConfigError, load_env
 from .firewall import FirewallError, render_file, tor_uid
 from .verify import verify
-
 
 DEFAULT_CONFIG = Path("/etc/amnesic-pi/network.env")
 DEFAULT_TEMPLATE = Path("/usr/share/amnesic-pi/policy.nft.in")
