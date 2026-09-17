@@ -1,0 +1,11 @@
+[Unit]
+Description=Verify Amnesic Pi security invariants
+After=tor@default.service amnesic-pi-firewall.service
+Requires=amnesic-pi-firewall.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/amnesic-pi verify
+
+[Install]
+WantedBy=multi-user.target
