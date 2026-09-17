@@ -1,0 +1,21 @@
+# Amnesic Pi Stage 1 Tor configuration
+ClientOnly 1
+RunAsDaemon 1
+
+# SOCKS is intentionally host-local. Transparent listeners accept packets
+# redirected from the downstream interface; nftables restricts which ingress
+# interface may reach them.
+SocksPort 127.0.0.1:9050 IsolateSOCKSAuth
+TransPort 0.0.0.0:9040 IsolateClientAddr IsolateClientProtocol
+DNSPort 0.0.0.0:5353 IsolateClientAddr
+
+AutomapHostsOnResolve 1
+AutomapHostsSuffixes .onion,.exit
+VirtualAddrNetworkIPv4 10.192.0.0/10
+
+SafeSocks 1
+TestSocks 1
+ClientRejectInternalAddresses 1
+ClientDNSRejectInternalAddresses 1
+
+Log notice syslog
