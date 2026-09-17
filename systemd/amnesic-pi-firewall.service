@@ -1,0 +1,14 @@
+[Unit]
+Description=Amnesic Pi fail-closed firewall
+DefaultDependencies=no
+After=local-fs.target
+Before=systemd-sysctl.service network-pre.target tor@default.service tor.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/amnesic-pi-firewall
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target
