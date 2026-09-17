@@ -1,0 +1,43 @@
+table inet amnesic_pi {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+
+        # Client DNS is handled anonymously by Tor DNSPort.
+        iifname "@CLIENT_IF@" udp dport 53 redirect to :@DNS_PORT@
+
+        # Generic TCP from downstream clients is transparently proxied by Tor.
+        iifname "@CLIENT_IF@" meta l4proto tcp redirect to :@TRANS_PORT@
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        iifname "lo" accept
+        ct state established,related accept
+
+        # DHCP requests to a future local DHCP service. Harmless if no server is bound.
+        iifname "@CLIENT_IF@" udp sport 68 udp dport 67 accept
+
+        # Traffic redirected by prerouting into local Tor listeners.
+        iifname "@CLIENT_IF@" udp dport @DNS_PORT@ accept
+        iifname "@CLIENT_IF@" tcp dport @TRANS_PORT@ accept
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority filter; policy drop;
+
+        oifname "lo" accept
+        ct state established,related accept
+
+        # Uplink DHCP only. This is not general UDP authority.
+        oifname "@UPLINK_IF@" udp sport 68 udp dport 67 ip daddr 255.255.255.255 accept
+        oifname "@UPLINK_IF@" udp sport 68 udp dport 67 ip daddr 0.0.0.0 accept
+
+        # Sole normal Internet principal: the Tor service UID, TCP only.
+        oifname "@UPLINK_IF@" meta skuid @TOR_UID@ meta l4proto tcp accept
+    }
+}
