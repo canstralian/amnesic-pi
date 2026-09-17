@@ -14,6 +14,7 @@ dependencies = []
 
 [project.scripts]
 amnesic-pi = "amnesic_pi.cli:main"
+amnesic-orchestrator = "orchestrator.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

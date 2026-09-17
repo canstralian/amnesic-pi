@@ -1,0 +1,109 @@
+# Topology manifest — T1 controlled.
+#
+# Adding, renaming, or removing a team is a T1 act. Every team requires a
+# charter in this file; the loader refuses a team without one, which is what
+# stops a "temporary" team with no charter from becoming a shadow org.
+#
+# Tier mapping onto the Claude Code harness:
+#   T2  team lead      -> .claude/agents/<lead>.md        (own context, dispatched by T1)
+#   T3  sub-agent      -> .claude/skills/<name>/SKILL.md  (loaded by its lead)
+#   T4  tool/runtime   -> the `tools` list below
+#
+# Sub-agents are skills rather than nested agents because a Claude Code agent
+# cannot spawn another agent. Making T3 a skill keeps invariant I1 literally
+# true: the orchestrator's only dispatch targets are the leads, and a sub-agent
+# is reachable only from inside its own lead's context.
+
+version = 1
+
+[[team]]
+name = "threat-research"
+lead = "threat-research-lead"
+charter = """
+Owns the adversary model. Triages claimed capabilities against what this
+appliance actually defends, and produces the threat-model delta for any change
+that alters the security boundary. Holds no gate: research informs decisions,
+it does not certify them.
+"""
+gates_owned = []
+subagents = ["threat-delta", "adversary-triage"]
+tools = ["Read", "Grep", "Glob", "WebSearch"]
+
+[[team]]
+name = "policy"
+lead = "policy-lead"
+charter = """
+Owns the security boundary itself: network/policy.nft.in, config/torrc,
+config/99-amnesic-pi.conf. Authors and reviews every rule that grants or denies
+network authority. Any new egress principal must be explicit, named, and
+documented before this team signs POLICY_CLEAN.
+"""
+gates_owned = ["POLICY_CLEAN"]
+subagents = ["nft-policy-audit", "egress-authority-review"]
+tools = ["Read", "Edit", "Write", "Grep", "Bash(nft:*)"]
+
+[[team]]
+name = "runtime"
+lead = "runtime-lead"
+charter = """
+Owns the control plane that renders and applies policy: src/amnesic_pi,
+bin/amnesic-pi-firewall, and the systemd units. Responsible for the property
+that a configuration parse failure never flushes a known-good ruleset, and that
+no shell interpolation reaches a command unquoted.
+"""
+gates_owned = ["RUNTIME_SOUND"]
+subagents = ["unsafe-interpolation-scan", "systemd-order-audit"]
+tools = ["Read", "Edit", "Write", "Grep", "Bash(python:*)", "Bash(ruff:*)", "Bash(pytest:*)"]
+
+[[team]]
+name = "verification"
+lead = "verification-lead"
+charter = """
+Owns proof that the failure paths stay closed. Authors regression tests for
+every broadened authority, runs the leak suites, and red-teams the appliance
+from a downstream client. Owns the only unwaivable gate in the system, and is
+the one team permitted to declare a release unsafe over another team's
+objection.
+"""
+gates_owned = ["VERIFY_PASS", "FAIL_CLOSED_PASS"]
+subagents = ["leak-test-author", "fail-closed-redteam"]
+tools = ["Read", "Write", "Edit", "Grep", "Bash(pytest:*)", "Bash(nft:*)", "Bash(dig:*)"]
+
+[[team]]
+name = "platform"
+lead = "platform-lead"
+charter = """
+Owns the image and the host: image/provision.sh, OverlayFS amnesia, the
+maintenance-mode transition, and reproducibility across Raspberry Pi OS Lite
+ARM64 releases. Responsible for rejecting assumptions that hold on exactly one
+OS release.
+"""
+gates_owned = ["PLATFORM_READY"]
+subagents = ["image-provision-audit", "overlay-amnesia-check"]
+tools = ["Read", "Edit", "Write", "Grep", "Bash(bash:*)", "Bash(systemctl:*)"]
+
+[[team]]
+name = "docs"
+lead = "docs-lead"
+charter = """
+Owns what the operator is told: README.md, BUILD.md, THREAT-MODEL.md,
+SECURITY.md, AGENTS.md, docs/. Responsible for the claims matching the code —
+a documented guarantee the implementation does not provide is treated as a
+defect of the same severity as the missing control.
+"""
+gates_owned = ["SPEC_COMPLETE"]
+subagents = ["invariant-scribe", "operator-runbook"]
+tools = ["Read", "Edit", "Write", "Grep", "Glob"]
+
+[[team]]
+name = "release"
+lead = "release-lead"
+charter = """
+Owns the release gate and the rollback. Runs the ten-item hardware checklist,
+records a pre-registered rollback class for every shipped artifact, and refuses
+to sign a candidate whose upstream gates are not all green. Cannot waive
+another team's gate.
+"""
+gates_owned = ["RELEASE_SIGNED"]
+subagents = ["release-gate-runner", "rollback-registrar"]
+tools = ["Read", "Grep", "Bash(git:*)", "Bash(pytest:*)"]
