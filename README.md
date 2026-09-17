@@ -1,143 +1,126 @@
 # Amnesic Pi
 
-A fail-closed, ARM64 Tor gateway for Raspberry Pi with an ephemeral runtime.
+**Fail-closed ARM64 Tor gateway for Raspberry Pi with an ephemeral OverlayFS runtime.**
 
-Amnesic Pi is an experimental security appliance for Raspberry Pi 3, 4, and 5. It combines Raspberry Pi OS Lite ARM64, Tor, nftables, systemd ordering, and a RAM-backed OverlayFS to create a small gateway where downstream TCP traffic is transparently routed through Tor and ordinary runtime filesystem changes disappear after reboot.
+Amnesic Pi is an experimental Raspberry Pi security appliance. It combines Raspberry Pi OS Lite ARM64, Tor, nftables, systemd ordering, and Raspberry Pi's RAM-backed OverlayFS to create a small gateway where downstream TCP traffic is transparently routed through Tor and ordinary runtime filesystem changes disappear after reboot.
 
-Amnesic Pi is not Tails and does not claim Tails-equivalent anonymity.
+> **Status: experimental / pre-1.0.** Amnesic Pi is not Tails, is not affiliated with the Tails Project or Tor Project, and does not claim Tails-equivalent anonymity guarantees.
 
-Its design goal is narrower and testable:
+## Stage 1 objective
 
-BOOT
-  │
-  ▼
-INSTALL FAIL-CLOSED POLICY
-  │
-  ├── failure ──────────────► DENY
-  │
-  ▼
-ENABLE NETWORK STATE
-  │
-  ▼
-START TOR
-  │
-  ├── failure ──────────────► DENY
-  │
-  ▼
-VERIFY INVARIANTS
-  │
-  ├── failure ──────────────► DENY
-  │
-  ▼
-TOR-ONLY CLIENT CONNECTIVITY
+```text
+BOOT -> FIREWALL DENY -> TOR -> VERIFY -> TOR-ONLY CLIENT CONNECTIVITY
+                     \\-> any failure -> DENY
+```
 
-Core rule
+The core rule is simple:
 
-«No network path exists merely because an application asks for one.»
+> **Network authority is absent by default.** An application wanting a socket does not grant it authority to reach the Internet.
 
-Network authority is explicitly granted by policy.
+Stage 1 is intentionally narrow. It proves the network and amnesia invariants before adding convenience features such as Wi-Fi AP mode, DHCP, browser integration, persistence UI, or image publishing.
 
-In Stage 1, the Tor service account is the only normal process permitted outbound Internet TCP access.
-
-Security invariants
+## Security invariants
 
 1. Client traffic has no ordinary clearnet forwarding path.
-2. "input", "forward", and "output" default to "DROP".
-3. Tor is the sole normal Internet TCP principal.
-4. Client TCP is redirected into Tor's transparent proxy.
-5. Client DNS is redirected into Tor's DNS listener.
-6. Arbitrary client UDP is denied.
-7. IPv6 is disabled until equivalent leak controls exist.
-8. Tor failure must result in loss of connectivity, not clearnet fallback.
-9. Runtime filesystem changes are ephemeral once OverlayFS is enabled.
-10. Persistent storage is separate and opt-in.
+2. `input`, `forward`, and `output` use default `DROP` policies.
+3. Tor is the only normal process granted outbound Internet TCP authority.
+4. Downstream TCP is redirected into Tor's `TransPort`.
+5. Downstream UDP/53 is redirected into Tor's `DNSPort`.
+6. Other downstream UDP, including QUIC, is denied.
+7. IPv6 is disabled until equivalent leak-proof policy and tests exist.
+8. Stopping or crashing Tor must remove connectivity rather than expose clearnet.
+9. Runtime root-filesystem changes disappear after reboot once OverlayFS is enabled.
+10. Persistent storage is separate, opt-in, and outside the Stage 1 base system.
 
-Architecture
+## Reference topology
 
-                         INTERNET
-                             │
-                             │
-                       ┌─────▼─────┐
-                       │   eth0    │
-                       │  UPLINK   │
-                       └─────┬─────┘
-                             │
-                 ┌───────────▼───────────┐
-                 │     nftables          │
-                 │                       │
-                 │  DEFAULT: DROP        │
-                 │  explicit authority   │
-                 └───────────┬───────────┘
-                             │
-                      ┌──────▼──────┐
-                      │     Tor     │
-                      │ TransPort   │
-                      │ DNSPort     │
-                      │ SOCKSPort   │
-                      └──────┬──────┘
-                             │
-                 transparent interception
-                             │
-                       ┌─────▼─────┐
-                       │   eth1    │
-                       │  CLIENT   │
-                       └─────┬─────┘
-                             │
-                    laptop / phone
+Stage 1 uses two wired interfaces because it is easier to audit and does not silently depend on hostapd/DHCP configuration.
 
-The root filesystem becomes:
+```text
+                         Internet/router
+                               |
+                         eth0  UPLINK
+                               |
+                    +----------v----------+
+                    |    Raspberry Pi 5   |
+                    |                     |
+                    | nftables -> Tor     |
+                    | default DROP        |
+                    +----------+----------+
+                               |
+                         eth1  CLIENT
+                               |
+                         laptop / phone
+```
 
-read-only Raspberry Pi OS
-          +
-RAM-backed writable OverlayFS
-          =
-ephemeral runtime root
+A USB-to-Ethernet adapter is sufficient for `eth1`.
 
-Recommended Stage 1 hardware
+## Traffic path
+
+```text
+DOWNSTREAM CLIENT
+       |
+       v
+[nftables prerouting]
+       |
+       +-- UDP/53 ------> Tor DNSPort :5353
+       |
+       +-- TCP ---------> Tor TransPort :9040
+       |
+       +-- other traffic -> DENY
+
+Tor process
+       |
+       v
+[nftables output]
+       |
+       +-- Tor UID + TCP + uplink -> ALLOW
+       +-- anything else          -> DENY
+```
+
+The transparent Tor listeners bind on IPv4 wildcard addresses so redirected packets arriving from the client interface can reach them. The firewall permits access to those ports only from the configured downstream interface. The SOCKS listener remains bound to loopback.
+
+## Hardware
+
+Primary target:
 
 - Raspberry Pi 5
 - Raspberry Pi OS Lite 64-bit
-- microSD card or USB/NVMe boot storage
+- 16 GB or larger microSD, USB SSD, or NVMe storage
 - Ethernet uplink
-- USB Ethernet adapter for the client network
-- local keyboard/display during initial deployment
+- USB-to-Ethernet adapter for downstream traffic
+- local keyboard/display during initial firewall deployment
 
-The first deployment deliberately avoids Wi-Fi AP mode. That becomes a later capability after the Tor and firewall boundaries are proven.
+Pi 3 and Pi 4 should also be viable with current Raspberry Pi OS ARM64, but the release gate is hardware-tested primarily on Pi 5.
 
-Repository layout
+## Repository layout
 
+```text
 amnesic-pi/
 ├── README.md
 ├── BUILD.md
 ├── SECURITY.md
 ├── THREAT-MODEL.md
 ├── AGENTS.md
-│
 ├── config/
 │   ├── network.env.example
 │   ├── torrc
 │   └── 99-amnesic-pi.conf
-│
 ├── network/
 │   └── policy.nft.in
-│
 ├── systemd/
 │   ├── amnesic-pi-firewall.service
 │   ├── amnesic-pi-verify.service
 │   └── tor-amnesic-pi.conf
-│
 ├── src/amnesic_pi/
 │   ├── cli.py
 │   ├── config.py
 │   ├── firewall.py
 │   └── verify.py
-│
 ├── image/
 │   └── provision.sh
-│
 ├── scripts/
 │   └── check-amnesia.sh
-│
 └── tests/
     ├── test_config.py
     ├── test_firewall.py
@@ -145,105 +128,114 @@ amnesic-pi/
     ├── test_torrc.py
     └── integration/
         └── fail_closed.sh
+```
 
-Quick start
+## Quick start
 
-Start with a fresh Raspberry Pi OS Lite 64-bit installation.
+Use a **local console** during the first firewall deployment. A default-DROP firewall can lock out SSH if you apply it remotely.
 
+```bash
 git clone https://github.com/canstralian/amnesic-pi.git
 cd amnesic-pi
-
-Review the threat model before deployment:
-
 less THREAT-MODEL.md
-
-Provision:
-
 sudo ./image/provision.sh
+```
 
 Configure interface roles:
 
+```bash
 sudoedit /etc/amnesic-pi/network.env
+```
 
-Recommended Stage 1 configuration:
+Recommended Stage 1 values:
 
+```ini
 UPLINK_IF=eth0
 CLIENT_IF=eth1
-
 TRANS_PORT=9040
 DNS_PORT=5353
 SOCKS_PORT=9050
-
 TOR_USER=debian-tor
+```
 
-Inspect the generated firewall:
+Review the rendered policy before applying it:
 
+```bash
 sudo amnesic-pi render-firewall | less
+```
 
-Apply it from a local console:
+Then, from a local console:
 
+```bash
 sudo amnesic-pi apply-firewall
 sudo sysctl --system
-
-Start Tor:
-
 sudo systemctl restart tor@default.service
-
-Verify:
-
 sudo amnesic-pi verify
 sudo nft list table inet amnesic_pi
+```
 
-Enable boot-time services only after those checks succeed:
+Only after manual validation succeeds:
 
+```bash
 sudo systemctl enable amnesic-pi-firewall.service
 sudo systemctl enable tor@default.service
 sudo systemctl enable amnesic-pi-verify.service
-
-Then reboot:
-
 sudo reboot
+```
 
-Fail-closed test
+The complete installation, downstream client setup, leak tests, OverlayFS procedure, maintenance transition, and release gate are in **[BUILD.md](BUILD.md)**.
 
-After successful operation:
+## Fail-closed test
 
+The repository includes a root-only integration scaffold:
+
+```bash
 sudo tests/integration/fail_closed.sh
+```
 
-The test stops Tor and confirms that ordinary local TCP connectivity does not become available.
+The more important hardware test is performed from an actual downstream client:
 
-A release still requires testing from an actual downstream client.
+1. verify TCP connectivity while Tor is running;
+2. stop `tor@default.service`;
+3. repeat the client request;
+4. confirm it fails rather than falling back to ordinary routing;
+5. restart Tor and confirm connectivity returns.
 
-Amnesic mode
+## Amnesic mode
 
-Only enable OverlayFS after the base system is working and fully updated:
+After the base system and failure tests pass, enable Raspberry Pi OS OverlayFS:
 
+```bash
 sudo raspi-config
+```
 
-Select:
+Navigate to:
 
-Performance Options
-  └── Overlay File System
-        ├── Enable overlay filesystem
-        └── optionally write-protect boot partition
+```text
+4 Performance Options
+  -> P2 Overlay File System
+```
 
-Reboot.
+The read-only root becomes the lower layer while runtime writes go to a temporary RAM-backed upper layer. Those ordinary runtime changes disappear on reboot.
 
-Create the amnesia probe:
+Verify that behavior with:
 
+```bash
 sudo ./scripts/check-amnesia.sh arm
 sudo reboot
+```
 
 After reboot:
 
+```bash
 sudo ./scripts/check-amnesia.sh verify
+```
 
-The marker must be absent.
+## Release gate
 
-Release gate
+Do not describe a release as fail-closed until the candidate passes all of the following on target hardware:
 
-No release should be described as fail-closed until it has passed:
-
+```text
 [ ] unit/static tests
 [ ] nftables syntax validation
 [ ] firewall boot-order validation
@@ -254,34 +246,20 @@ No release should be described as fail-closed until it has passed:
 [ ] UDP/QUIC leak test
 [ ] IPv6 leak test
 [ ] reboot-amnesia test
+```
 
-Threat model
+## Threat boundary
 
-Amnesic Pi is designed primarily to reduce:
+Amnesic Pi is designed to reduce accidental network leakage and unintended runtime persistence. It does **not** solve browser/device fingerprinting, application-layer identity leaks, endpoint compromise, malicious firmware, physical attacks against powered hardware, malicious Tor exits, or global traffic correlation.
 
-- accidental clearnet fallback;
-- DNS leakage;
-- unsupported UDP escape paths;
-- network authority accidentally granted to local applications;
-- persistence of ordinary runtime state across reboots.
+Read **[THREAT-MODEL.md](THREAT-MODEL.md)** before relying on the appliance.
 
-It does not protect against:
+## Development rule
 
-- root or kernel compromise;
-- malicious firmware;
-- compromised downstream clients;
-- browser fingerprinting;
-- application-layer identity disclosure;
-- global traffic correlation;
-- malicious Tor exits;
-- physical attacks against powered hardware.
+Any change that broadens network authority must include a regression test demonstrating that its corresponding failure path remains closed.
 
-Read ""THREAT-MODEL.md"" (THREAT-MODEL.md) before relying on the system.
+See **[AGENTS.md](AGENTS.md)** for the contributor and agent invariants.
 
-Project status
+## License
 
-Experimental / pre-1.0.
-
-This repository is a security engineering project, not an anonymity guarantee.
-
-Every feature that expands network authority must come with a regression test proving that its failure path remains closed.
+MIT. See [LICENSE](LICENSE).
