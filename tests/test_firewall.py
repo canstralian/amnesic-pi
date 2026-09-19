@@ -3,7 +3,6 @@ from pathlib import Path
 from amnesic_pi.config import Config
 from amnesic_pi.firewall import render
 
-
 TEMPLATE = Path("network/policy.nft.in").read_text()
 
 
