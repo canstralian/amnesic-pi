@@ -26,3 +26,11 @@ addopts = "-ra"
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+
+# Pinned explicitly rather than inherited. CI installs ruff unpinned, so relying
+# on its default rule set lets a ruff release turn the build red with no commit
+# behind it — which is what happened when isort (I) entered the defaults. This
+# records what CI enforces today; changing what is linted is now a deliberate
+# edit to this list.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
