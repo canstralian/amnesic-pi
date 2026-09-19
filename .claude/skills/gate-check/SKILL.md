@@ -56,5 +56,12 @@ that skipped it is an incident, not a waiver.
 ## Before shipping
 
 ```python
-dispatcher.assert_shippable(graph_id)   # raises PolicyBreach naming ungated nodes
+dispatcher.assert_shippable(graph, graph_id=graph_id)
 ```
+
+Pass the **graph**, not just its id. The check walks every node in the graph and
+requires a live task in `gate_pass` for each. Checking only the tasks that were
+dispatched let a node still held on its dependency pass unnoticed — a graph could
+report shippable with its `FAIL_CLOSED_PASS` node never issued. A node with no
+live owner is named as `never dispatched`; one with an owner that has not passed
+is named under `no passing gate`.

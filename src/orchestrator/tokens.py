@@ -113,9 +113,18 @@ class KeyRing:
             return self._rotate()
         return self._keys[0]
 
-    def rotate_now(self) -> None:
-        """Force a rotation. Used by the operator CLI and by key revocation."""
+    def rotate_now(self, *, revoke: bool = False) -> None:
+        """Force a rotation.
+
+        A plain rotation keeps the previous key verifiable so tasks signed just
+        before it are not dropped in flight. ``revoke=True`` drops every prior
+        key immediately, which is what a suspected key compromise needs: it
+        invalidates outstanding tokens rather than honouring them for one more
+        window.
+        """
         self._rotate()
+        if revoke:
+            del self._keys[1:]
 
     def _lookup(self, key_id: str) -> _Key:
         for key in self._keys:

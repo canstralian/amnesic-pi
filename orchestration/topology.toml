@@ -13,6 +13,20 @@
 # cannot spawn another agent. Making T3 a skill keeps invariant I1 literally
 # true: the orchestrator's only dispatch targets are the leads, and a sub-agent
 # is reachable only from inside its own lead's context.
+#
+# `tools` is a DECLARED action manifest, not an enforced one. Two limits, both
+# real:
+#
+#   1. A Claude Code agent's `tools:` frontmatter takes tool NAMES. The scoping
+#      in `Bash(nft:*)` is permission syntax for `.claude/settings.json`, so an
+#      agent granted Bash here holds unrestricted Bash at runtime. Narrowing it
+#      means adding permission rules, which is a deliberate act for the operator
+#      rather than something this manifest can do on its own.
+#   2. Nothing in `src/orchestrator/` consults this list when dispatching. It
+#      documents intent and is checked against the agent files by
+#      tests/orchestrator/test_topology.py, which fails if a lead's frontmatter
+#      claims a tool this manifest does not declare. That catches drift; it does
+#      not constrain the runtime.
 
 version = 1
 
@@ -27,7 +41,7 @@ it does not certify them.
 """
 gates_owned = []
 subagents = ["threat-delta", "adversary-triage"]
-tools = ["Read", "Grep", "Glob", "WebSearch"]
+tools = ["Read", "Grep", "Glob", "WebSearch", "WebFetch"]
 
 [[team]]
 name = "policy"
@@ -40,7 +54,7 @@ documented before this team signs POLICY_CLEAN.
 """
 gates_owned = ["POLICY_CLEAN"]
 subagents = ["nft-policy-audit", "egress-authority-review"]
-tools = ["Read", "Edit", "Write", "Grep", "Bash(nft:*)"]
+tools = ["Read", "Edit", "Write", "Grep", "Glob", "Bash(nft:*)"]
 
 [[team]]
 name = "runtime"
@@ -53,7 +67,10 @@ no shell interpolation reaches a command unquoted.
 """
 gates_owned = ["RUNTIME_SOUND"]
 subagents = ["unsafe-interpolation-scan", "systemd-order-audit"]
-tools = ["Read", "Edit", "Write", "Grep", "Bash(python:*)", "Bash(ruff:*)", "Bash(pytest:*)"]
+tools = [
+  "Read", "Edit", "Write", "Grep", "Glob",
+  "Bash(python:*)", "Bash(ruff:*)", "Bash(pytest:*)",
+]
 
 [[team]]
 name = "verification"
@@ -67,7 +84,10 @@ objection.
 """
 gates_owned = ["VERIFY_PASS", "FAIL_CLOSED_PASS"]
 subagents = ["leak-test-author", "fail-closed-redteam"]
-tools = ["Read", "Write", "Edit", "Grep", "Bash(pytest:*)", "Bash(nft:*)", "Bash(dig:*)"]
+tools = [
+  "Read", "Write", "Edit", "Grep", "Glob",
+  "Bash(pytest:*)", "Bash(nft:*)", "Bash(dig:*)",
+]
 
 [[team]]
 name = "platform"
@@ -80,7 +100,10 @@ OS release.
 """
 gates_owned = ["PLATFORM_READY"]
 subagents = ["image-provision-audit", "overlay-amnesia-check"]
-tools = ["Read", "Edit", "Write", "Grep", "Bash(bash:*)", "Bash(systemctl:*)"]
+tools = [
+  "Read", "Edit", "Write", "Grep", "Glob",
+  "Bash(bash:*)", "Bash(systemctl:*)",
+]
 
 [[team]]
 name = "docs"
@@ -106,4 +129,4 @@ another team's gate.
 """
 gates_owned = ["RELEASE_SIGNED"]
 subagents = ["release-gate-runner", "rollback-registrar"]
-tools = ["Read", "Grep", "Bash(git:*)", "Bash(pytest:*)"]
+tools = ["Read", "Grep", "Glob", "Bash(git:*)", "Bash(pytest:*)"]

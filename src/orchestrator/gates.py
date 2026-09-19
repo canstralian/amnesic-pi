@@ -171,15 +171,35 @@ class GateResult:
         missing = {"gate", "passed", "evidence", "checked_by"} - set(raw)
         if missing:
             raise SchemaError(f"gate result is missing keys: {', '.join(sorted(missing))}")
+        evidence = raw["evidence"]
+        # A bare string is iterable, so tuple() used to split "looks fine" into
+        # ten characters, which then satisfied the non-empty evidence rule.
+        if isinstance(evidence, str) or not isinstance(evidence, (list, tuple)):
+            raise SchemaError(
+                f"gate {raw['gate']} evidence must be a list of strings, got "
+                f"{type(evidence).__name__}"
+            )
+        if not all(isinstance(item, str) for item in evidence):
+            raise SchemaError(f"gate {raw['gate']} evidence must be a list of strings")
+
         checked_at = raw.get("checked_at")
+        if checked_at is None:
+            parsed_at = utcnow()
+        else:
+            try:
+                parsed_at = datetime.fromisoformat(checked_at)
+            except (TypeError, ValueError) as exc:
+                raise SchemaError(
+                    f"gate {raw['gate']} checked_at is not an ISO-8601 timestamp: "
+                    f"{checked_at!r}"
+                ) from exc
+
         result = cls(
             gate=raw["gate"],
             passed=raw["passed"],
-            evidence=tuple(raw["evidence"]),
+            evidence=tuple(evidence),
             checked_by=raw["checked_by"],
-            checked_at=(
-                utcnow() if checked_at is None else datetime.fromisoformat(checked_at)
-            ),
+            checked_at=parsed_at,
         )
         result.validate()
         return result

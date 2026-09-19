@@ -74,3 +74,30 @@ def test_every_lead_has_an_agent_file(topology: Topology, repo_root: Path):
         if not (repo_root / ".claude" / "agents" / f"{team.lead}.md").is_file()
     ]
     assert not missing, f"team leads without an agent definition: {missing}"
+
+
+def _frontmatter_tools(path: Path) -> set[str]:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("tools:"):
+            return {part.strip() for part in line.split(":", 1)[1].split(",") if part.strip()}
+    return set()
+
+
+def test_lead_frontmatter_never_exceeds_the_declared_tool_manifest(
+    topology: Topology, repo_root: Path
+):
+    """A lead must not hold a tool the manifest does not declare for its team.
+
+    The manifest cannot enforce Bash scoping — `Bash(nft:*)` is settings.json
+    permission syntax, not frontmatter — so this compares base tool names only.
+    It catches the drift it can catch, and the manifest comment states plainly
+    what it cannot.
+    """
+    drift: dict[str, set[str]] = {}
+    for team in topology.teams:
+        declared = {tool.split("(", 1)[0] for tool in team.tools}
+        granted = _frontmatter_tools(repo_root / ".claude" / "agents" / f"{team.lead}.md")
+        extra = granted - declared
+        if extra:
+            drift[team.lead] = extra
+    assert not drift, f"agent frontmatter grants tools the manifest does not declare: {drift}"

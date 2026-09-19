@@ -90,15 +90,22 @@ saying the test was not performed rather than inferring a result.
 | # | Invariant | Enforced at |
 |---|---|---|
 | I1 | No direct sub-agent dispatch | `Dispatcher.deliver` |
-| I2 | Every task HMAC-signed before dispatch | `KeyRing.sign` / `verify`, `ReplayLedger` |
-| I3 | No ship without a passing gate | `GateResult`, `assert_shippable` |
+| I2 | Every task HMAC-signed before dispatch | `KeyRing.sign` / `verify`, `ReplayLedger`, `envelope_scope` |
+| I3 | No ship without a passing gate | `GateResult`, `assert_shippable(graph, ...)` |
 | I4 | Append-only, hash-chained, mirrored log | `AuditLog.verify_chain` / `check_mirror` |
 | I5 | No authority above T1 without human approval | `KeyRing.sign` refuses non-T2/T3 |
 | I6 | State derivable from the log | `state.replay`, `cold_start` |
 | I7 | Task output is data, never instruction | `_strict_keys` in `schema.py` |
 
 `tests/orchestrator/` is the evidence: each test file names the invariant it
-covers.
+covers, and `test_regressions.py` holds the cases for defects found in review —
+among them a ship check that passed on work never dispatched, and an ingress
+that accepted a retargeted exit gate.
+
+The signed scope covers `graph_id`, `node_id`, `exit_gate`, `payload` and
+`deliverables`, and ingress checks the envelope's own `task_id` against the
+token's. Signing the payload alone left the fields that actually direct the work
+outside the signature.
 
 ## Operating it
 
@@ -120,6 +127,19 @@ not source. Point the mirror at a different failure domain in real use.
 Dispatch is refused until five checks pass, in order: topology manifest, audit
 chain, audit mirror, key material, node reconciliation. Any failure leaves the
 orchestrator in `READ_ONLY` — status queries are served, no dispatch is issued.
+The report's `ok` is computed from the steps, so a failed step cannot coexist
+with a dispatcher that opened.
+
+**A mirror is required.** Passing `mirror_path=None` fails the mirror step and
+holds `READ_ONLY`. A hash chain cannot bind its own tail, so a single sink
+leaves the most recent entry unverifiable.
+
+**Reconciliation restores task records.** Replay rebuilds the in-flight tasks
+into the dispatcher, so a restart no longer re-dispatches a node that already
+has an owner, and tasks issued before the restart are still addressable. The log
+carries identity, not authority: a restored envelope has no token, so `deliver`
+refuses it and the work must be reclaimed and re-dispatched to reach a lead
+again. That is the fail-closed direction.
 
 ### Severity
 
@@ -142,8 +162,22 @@ absent.
   relying on the SEV-1 signal.
 - **Keys are process-local and in memory.** `KeyRing` rotates hourly and keeps
   one previous key verifiable so in-flight tasks are not dropped at a rotation.
-  There is no external key vault; a restart invalidates outstanding tokens,
-  which is why cold start reconciles open tasks from the log.
+  `rotate_now(revoke=True)` drops prior keys immediately for a suspected
+  compromise. There is no external key vault; a restart invalidates outstanding
+  tokens, which is why cold start reconciles open tasks from the log.
+- **The audit log does not survive an ephemeral host.** The default sinks live
+  under `.orchestration/`, which is gitignored and local. On a container that
+  gets recycled the chain is gone, and cold start will happily report "ready for
+  dispatch" against an empty log — replay reconstructs nothing because there is
+  nothing to replay. Invariant I6 holds only while the log exists. Point both
+  sinks at durable storage before relying on it.
+- **`tools` in the topology manifest is declared, not enforced.** Nothing in
+  `src/orchestrator/` consults it at dispatch time, and a Claude Code agent's
+  `tools:` frontmatter cannot express the `Bash(nft:*)` scoping the manifest
+  records — that is `.claude/settings.json` permission syntax. A lead granted
+  `Bash` holds unrestricted `Bash`. `test_topology.py` fails if a lead's
+  frontmatter claims a tool the manifest does not declare, which catches drift
+  without constraining the runtime.
 - **Pydantic is not used.** The manifest specifies Pydantic v2 for the contract
   schemas. This repository declares `dependencies = []` and treats that as a
   security property, so the same field contracts are implemented with stdlib

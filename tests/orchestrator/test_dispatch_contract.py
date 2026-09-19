@@ -111,23 +111,28 @@ def test_blocked_status_requires_a_blocker(dispatcher: Dispatcher, make_node):
         dispatcher.ingest_status(_status(envelope.task_id, "blocked"))
 
 
-def test_percent_complete_never_advances_a_task(dispatcher: Dispatcher, make_node):
-    envelope = dispatcher.dispatch(make_node(), graph_id="G1")
+def test_percent_complete_never_advances_a_task(dispatcher: Dispatcher, make_node, make_graph):
+    node = make_node()
+    graph = make_graph(node)
+    envelope = dispatcher.dispatch(node, graph_id="G1")
     dispatcher.ingest_status({**_status(envelope.task_id, "running"), "pct_complete": 100})
     assert dispatcher.task(envelope.task_id).state == "running"
-    assert not dispatcher.may_ship("G1")
+    assert not dispatcher.may_ship(graph, graph_id="G1")
 
 
-def test_ship_is_blocked_until_every_gate_passes(dispatcher: Dispatcher, make_node):
-    first = dispatcher.dispatch(make_node("deny-quic"), graph_id="G1")
-    dispatcher.dispatch(make_node("doc-the-delta", team="docs", exit_gate="SPEC_COMPLETE",
-                                  path="docs/networking.md"), graph_id="G1")
+def test_ship_is_blocked_until_every_gate_passes(dispatcher: Dispatcher, make_node, make_graph):
+    quic = make_node("deny-quic")
+    docs = make_node("doc-the-delta", team="docs", exit_gate="SPEC_COMPLETE",
+                     path="docs/networking.md")
+    graph = make_graph(quic, docs)
+    first = dispatcher.dispatch(quic, graph_id="G1")
+    dispatcher.dispatch(docs, graph_id="G1")
     dispatcher.accept_gate(first.task_id, {
         "gate": "POLICY_CLEAN", "passed": True,
         "evidence": ["nft -c ok"], "checked_by": "policy",
     })
-    with pytest.raises(PolicyBreach, match="without a passing gate"):
-        dispatcher.assert_shippable("G1")
+    with pytest.raises(PolicyBreach, match="no passing gate"):
+        dispatcher.assert_shippable(graph, graph_id="G1")
 
 
 def test_wrong_gate_for_the_task_is_refused(dispatcher: Dispatcher, make_node):

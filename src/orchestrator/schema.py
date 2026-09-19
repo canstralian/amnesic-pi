@@ -59,6 +59,30 @@ def payload_digest(payload: Any) -> str:
     return sha256_hex(canonical_json(payload))
 
 
+def envelope_scope(
+    *,
+    graph_id: str,
+    node_id: str,
+    exit_gate: str,
+    payload: Any,
+    deliverables: Any,
+) -> dict[str, Any]:
+    """The bytes a handoff token commits to.
+
+    Signing the payload alone left the fields that actually direct the work
+    outside the signature: the exit gate could be retargeted from an unwaivable
+    gate to a waivable one, and the deliverables repointed, without invalidating
+    the token. Everything a lead acts on is covered here.
+    """
+    return {
+        "graph_id": graph_id,
+        "node_id": node_id,
+        "exit_gate": exit_gate,
+        "payload": payload,
+        "deliverables": [ref.to_dict() for ref in deliverables],
+    }
+
+
 def _require_mapping(raw: Any, what: str) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise SchemaError(f"{what} must be a JSON object, got {type(raw).__name__}")

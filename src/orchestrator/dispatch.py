@@ -17,11 +17,13 @@ from .errors import AuthorityError, DispatchRejected, PolicyBreach, ReadOnlyMode
 from .gates import GateResult, gate
 from .schema import (
     DISPATCHABLE_TIERS,
+    ArtifactRef,
     DecisionMemo,
     StatusUpdate,
     TaskEnvelope,
     WorkGraph,
     WorkNode,
+    envelope_scope,
     payload_digest,
     utcnow,
 )
@@ -176,11 +178,18 @@ class Dispatcher:
         resolved_payload.setdefault("acceptance", list(node.acceptance))
 
         tid = task_id or new_task_id()
+        scope = envelope_scope(
+            graph_id=graph_id,
+            node_id=node.id,
+            exit_gate=node.exit_gate,
+            payload=resolved_payload,
+            deliverables=node.deliverables,
+        )
         token = self._keys.sign(
             task_id=tid,
             team=team.name,
             tier_max=node.tier_max,
-            payload=resolved_payload,
+            payload=scope,
             ttl=ttl,
         )
         envelope = TaskEnvelope(
@@ -210,6 +219,7 @@ class Dispatcher:
             exit_gate=node.exit_gate,
             token_hash=f"sha256:{payload_digest(token.to_dict())}",
             payload_hash=f"sha256:{payload_digest(resolved_payload)}",
+            deliverables=[ref.to_dict() for ref in node.deliverables],
         )
         now = self._clock()
         self._tasks[tid] = TaskRecord(
@@ -269,9 +279,20 @@ class Dispatcher:
                 f"{to_agent!r} is not the lead of team {team.name!r}; "
                 f"its declared lead is {team.lead!r}"
             )
+        if envelope.task_id != token.task_id:
+            raise AuthorityError(
+                f"envelope task_id {envelope.task_id} does not match the task_id its token "
+                f"was signed for ({token.task_id}); refusing substituted envelope"
+            )
         self._keys.verify(
             token,
-            payload=envelope.payload,
+            payload=envelope_scope(
+                graph_id=envelope.graph_id,
+                node_id=envelope.node_id,
+                exit_gate=envelope.exit_gate,
+                payload=envelope.payload,
+                deliverables=envelope.deliverables,
+            ),
             team=envelope.team,
             required_tier=envelope.tier_max,
         )
@@ -303,8 +324,10 @@ class Dispatcher:
         record.state = update.state
         record.pct_complete = update.pct_complete
         record.next_update_by = update.next_update_by
-        if update.state == "accepted":
-            record.ack_deadline = None
+        # Any report from the lead is an acknowledgement. Requiring the literal
+        # state "accepted" left a lead whose first report was "running" flagged
+        # stuck forever, and eligible for a reclaim of work actively in hand.
+        record.ack_deadline = None
         self._audit.append(
             ACTOR,
             "status",
@@ -341,22 +364,45 @@ class Dispatcher:
         )
         return result
 
-    def may_ship(self, graph_id: str) -> bool:
-        """True only when every dispatched node in the graph passed its gate."""
-        nodes = [r for r in self._tasks.values() if r.envelope.graph_id == graph_id]
-        if not nodes:
-            return False
-        return all(r.state == "gate_pass" for r in nodes)
+    def live_record(self, graph_id: str, node_id: str) -> TaskRecord | None:
+        """The task currently owning a node, following any reclaim chain."""
+        task_id = self._by_node.get((graph_id, node_id))
+        return self._tasks.get(task_id) if task_id is not None else None
 
-    def assert_shippable(self, graph_id: str) -> None:
-        unwaived = [
-            r.envelope.node_id
-            for r in self._tasks.values()
-            if r.envelope.graph_id == graph_id and r.state != "gate_pass"
-        ]
-        if unwaived:
+    def may_ship(self, graph: WorkGraph, *, graph_id: str) -> bool:
+        try:
+            self.assert_shippable(graph, graph_id=graph_id)
+        except PolicyBreach:
+            return False
+        return True
+
+    def assert_shippable(self, graph: WorkGraph, *, graph_id: str) -> None:
+        """Refuse to ship unless every node in the graph has a live passing gate.
+
+        The graph is the subject, not the dispatch table. Checking only tasks
+        that happen to have been dispatched meant a node still held on its
+        dependency was invisible, so a graph could report shippable with its
+        unwaivable gate never issued — a fail-open on invariant I3. Only the
+        live record counts, so the abandoned half of a reclaim no longer blocks
+        a graph whose replacement passed.
+        """
+        never_dispatched: list[str] = []
+        ungated: list[str] = []
+        for node in graph.nodes:
+            record = self.live_record(graph_id, node.id)
+            if record is None:
+                never_dispatched.append(node.id)
+            elif record.state != "gate_pass":
+                ungated.append(node.id)
+
+        if never_dispatched or ungated:
+            parts = []
+            if never_dispatched:
+                parts.append(f"never dispatched: {', '.join(never_dispatched)}")
+            if ungated:
+                parts.append(f"no passing gate: {', '.join(ungated)}")
             raise PolicyBreach(
-                f"graph {graph_id} has nodes without a passing gate: {', '.join(unwaived)}. "
+                f"graph {graph_id} is not shippable ({'; '.join(parts)}). "
                 "Invariant I3: no ship action proceeds without a passing gate."
             )
 
@@ -387,6 +433,11 @@ class Dispatcher:
             raise DispatchRejected(f"cannot reclaim unknown task {task_id}")
         if record.state == "gate_pass":
             raise DispatchRejected(f"task {task_id} already passed its gate; nothing to reclaim")
+        if record.superseded_by is not None:
+            raise DispatchRejected(
+                f"task {task_id} was already reclaimed; its work is owned by "
+                f"{record.superseded_by}. Reclaim that task instead."
+            )
 
         record.state = "abandoned"
         self._audit.append(
@@ -414,6 +465,65 @@ class Dispatcher:
             chosen=memo.chosen,
             payload_hash=f"sha256:{payload_digest(memo.to_dict())}",
         )
+
+    # ---- restore -------------------------------------------------------
+
+    def restore_from(self, state: Any) -> int:
+        """Rebuild in-flight task records from a replayed audit log.
+
+        Invariant I6 says state is derivable from the log. It was not: cold
+        start replayed the log, used it for name checks, and threw it away, so
+        a restart re-dispatched nodes that already had an owner and answered
+        "unknown task" for anything issued before it.
+
+        The log carries identity, not authority. A restored envelope has no
+        token, so ``deliver`` refuses it and the work must be reclaimed and
+        re-dispatched to reach a lead again. That is the fail-closed direction.
+        """
+        restored = 0
+        for task_id, meta in state.dispatched.items():
+            if task_id in self._tasks:
+                continue
+            raw_deliverables = meta.get("deliverables") or ()
+            deliverables = tuple(
+                ArtifactRef.parse(ref, "restored deliverable") for ref in raw_deliverables
+            )
+            if not deliverables:
+                # Pre-dates deliverable logging; identity alone is not enough to
+                # rebuild a usable record, so leave it out rather than fake one.
+                continue
+            envelope = TaskEnvelope(
+                task_id=task_id,
+                graph_id=str(meta["graph_id"]),
+                node_id=str(meta["node_id"]),
+                team=str(meta["team"]),
+                tier_max=str(meta.get("tier_max") or "T3"),
+                payload={},
+                deliverables=deliverables,
+                exit_gate=str(meta["exit_gate"]),
+                token=None,
+                parent_audit_seq=int(meta["seq"]),
+            )
+            passed = state.gate_results.get(task_id)
+            if task_id in state.reclaimed:
+                task_state = "abandoned"
+            elif passed is True:
+                task_state = "gate_pass"
+            elif passed is False:
+                task_state = "gate_fail"
+            else:
+                task_state = "dispatched"
+
+            self._tasks[task_id] = TaskRecord(
+                envelope=envelope,
+                state=task_state,
+                ack_deadline=None,
+                history=[f"restored from audit seq={meta['seq']}"],
+            )
+            if task_state != "abandoned":
+                self._by_node[(envelope.graph_id, envelope.node_id)] = task_id
+            restored += 1
+        return restored
 
     # ---- projection ----------------------------------------------------
 

@@ -10,6 +10,7 @@ authoritative because it is held in memory.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from dataclasses import dataclass
@@ -54,9 +55,19 @@ def _entry_from_dict(raw: dict[str, Any]) -> AuditEntry:
     if missing:
         raise AuditChainError(f"audit entry is missing core fields: {', '.join(missing)}")
     fields = {k: v for k, v in raw.items() if k not in _CORE_FIELDS}
+    try:
+        ts = datetime.fromisoformat(raw["ts"])
+    except (TypeError, ValueError) as exc:
+        # A corrupt timestamp is tampering with the log, so it has to surface as
+        # an audit incident. Letting ValueError escape turned the documented
+        # SEV-2 READ_ONLY readout into a traceback.
+        raise AuditChainError(
+            f"audit entry at seq {raw.get('seq')!r} has an unparseable timestamp "
+            f"{raw['ts']!r}. SEV-2: halt dispatch and replay from the mirror."
+        ) from exc
     return AuditEntry(
         seq=raw["seq"],
-        ts=datetime.fromisoformat(raw["ts"]),
+        ts=ts,
         actor=raw["actor"],
         event=raw["event"],
         prev_hash=raw["prev_hash"],
@@ -84,6 +95,11 @@ class AuditLog:
         self._primary.parent.mkdir(parents=True, exist_ok=True)
         if self._mirror is not None:
             self._mirror.parent.mkdir(parents=True, exist_ok=True)
+        self._cached_head: AuditEntry | None = None
+        self._cached_size = -1
+
+    def _primary_size(self) -> int:
+        return self._primary.stat().st_size if self._primary.exists() else 0
 
     @property
     def path(self) -> Path:
@@ -107,9 +123,20 @@ class AuditLog:
             yield _entry_from_dict(raw)
 
     def head(self) -> AuditEntry | None:
+        """The last entry, re-scanned only when the file changed underneath us.
+
+        Scanning the whole log on every append made append quadratic in the
+        number of entries. The size check is what makes the cache safe: any
+        write by another process changes it and forces a re-read.
+        """
+        size = self._primary_size()
+        if size == self._cached_size:
+            return self._cached_head
         last: AuditEntry | None = None
         for entry in self.entries():
             last = entry
+        self._cached_head = last
+        self._cached_size = size
         return last
 
     def next_seq(self) -> int:
@@ -127,17 +154,31 @@ class AuditLog:
         for name in _CORE_FIELDS:
             if name in fields:
                 raise AuditChainError(f"cannot override core audit field {name!r}")
-        head = self.head()
-        entry = AuditEntry(
-            seq=0 if head is None else head.seq + 1,
-            ts=self._clock(),
-            actor=actor,
-            event=event,
-            prev_hash=GENESIS_HASH if head is None else head.entry_hash(),
-            fields=fields,
-        )
-        line = canonical_json(entry.to_dict())
-        self._write(self._primary, line)
+        # Computing seq/prev_hash and writing must be one critical section.
+        # Unlocked, two concurrent appends read the same head and emit the same
+        # seq with the same prev_hash — a chain break on an append-only log,
+        # which is exactly the corruption this log exists to detect.
+        with self._primary.open("a", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                head = self.head()
+                entry = AuditEntry(
+                    seq=0 if head is None else head.seq + 1,
+                    ts=self._clock(),
+                    actor=actor,
+                    event=event,
+                    prev_hash=GENESIS_HASH if head is None else head.entry_hash(),
+                    fields=fields,
+                )
+                line = canonical_json(entry.to_dict())
+                fh.write(line + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+                self._cached_head = entry
+                self._cached_size = self._primary_size()
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
         if self._mirror is not None:
             self._write(self._mirror, line)
         return entry

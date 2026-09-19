@@ -54,6 +54,8 @@ def replay(audit: AuditLog) -> ReplayState:
                 "node_id": fields.get("node_id"),
                 "graph_id": fields.get("graph_id"),
                 "exit_gate": fields.get("exit_gate"),
+                "tier_max": fields.get("tier_max"),
+                "deliverables": fields.get("deliverables"),
                 "seq": entry.seq,
             }
         elif entry.event == "gate_result" and task_id:
@@ -110,10 +112,21 @@ def cold_start(
         steps.append(("audit chain", False, f"SEV-2: {exc}"))
         return None, ColdStartReport(ok=False, steps=tuple(steps))
 
+    if mirror_path is None:
+        # Section 10 requires a reachable mirror. A hash chain cannot bind its
+        # own tail, so without a second sink the most recent entry is
+        # unverifiable — reporting FAIL here and opening anyway was the bug.
+        steps.append(
+            (
+                "audit mirror",
+                False,
+                "no mirror configured; the tail of the chain cannot be verified",
+            )
+        )
+        return None, ColdStartReport(ok=False, steps=tuple(steps), state=state)
     try:
         audit.check_mirror()
-        mirror_detail = "no mirror configured" if mirror_path is None else "sinks agree"
-        steps.append(("audit mirror", mirror_path is not None, mirror_detail))
+        steps.append(("audit mirror", True, "sinks agree"))
     except OrchestratorError as exc:
         steps.append(("audit mirror", False, f"SEV-1: {exc}"))
         return None, ColdStartReport(ok=False, steps=tuple(steps), state=state)
@@ -148,11 +161,18 @@ def cold_start(
         )
         steps.append(("node reconciliation", False, detail))
         return None, ColdStartReport(ok=False, steps=tuple(steps), state=state)
-    steps.append(("node reconciliation", True, f"{len(open_tasks)} open tasks reconciled"))
-
     dispatcher = Dispatcher(topology, keys, audit, read_only=True)
+    restored = dispatcher.restore_from(state)
+    detail = f"{len(open_tasks)} open tasks, {restored} task records restored"
+    if restored < len(open_tasks):
+        detail += f" ({len(open_tasks) - restored} pre-date deliverable logging)"
+    steps.append(("node reconciliation", True, detail))
+
     for team in sorted(state.paused_teams):
         dispatcher.pause_team(team, reason="restored from audit replay")
     dispatcher.open_for_dispatch()
     audit.append("orchestrator", "cold_start", entries_replayed=state.entries)
-    return dispatcher, ColdStartReport(ok=True, steps=tuple(steps), state=state)
+    report = ColdStartReport(ok=all(passed for _, passed, _ in steps), steps=tuple(steps), state=state)
+    if not report.ok:
+        return None, report
+    return dispatcher, report
