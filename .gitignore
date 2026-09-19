@@ -9,3 +9,6 @@ build/
 *.img
 *.img.xz
 *.log
+
+# Orchestration audit sinks are runtime state, not source.
+.orchestration/
