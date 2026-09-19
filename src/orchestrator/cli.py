@@ -23,6 +23,19 @@ DEFAULT_AUDIT = Path(".orchestration/audit.jsonl")
 DEFAULT_MIRROR = Path(".orchestration/mirror/audit.jsonl")
 
 
+def path_arg(value: str) -> Path:
+    """Reject an empty path before it silently becomes the current directory.
+
+    ``Path("")`` is ``Path(".")``, so an empty ``--manifest`` used to surface as
+    ``io error: [Errno 21] Is a directory: '.'`` — an errno about a directory the
+    operator never typed, with no mention of the flag that caused it. Every other
+    error this tool emits names its subject, so this one stood out.
+    """
+    if not value.strip():
+        raise argparse.ArgumentTypeError("path must not be empty")
+    return Path(value)
+
+
 def cmd_topology(args: argparse.Namespace) -> int:
     topology = Topology.load(args.manifest)
     print(f"topology v{topology.version} — {len(topology.teams)} teams\n")
@@ -112,9 +125,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="amnesic-orchestrator",
         description="T1 control plane: route work to team leads with a verifiable trail.",
     )
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument("--audit", type=Path, default=DEFAULT_AUDIT)
-    parser.add_argument("--mirror", type=Path, default=DEFAULT_MIRROR)
+    parser.add_argument("--manifest", type=path_arg, default=DEFAULT_MANIFEST)
+    parser.add_argument("--audit", type=path_arg, default=DEFAULT_AUDIT)
+    parser.add_argument("--mirror", type=path_arg, default=DEFAULT_MIRROR)
     sub = parser.add_subparsers(dest="command", required=True)
 
     show = sub.add_parser("topology", help="print teams, leads, rosters, and gate ownership")
@@ -124,7 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     gates.set_defaults(func=cmd_gates)
 
     validate = sub.add_parser("validate-graph", help="parse and validate a work graph JSON file")
-    validate.add_argument("graph", type=Path)
+    validate.add_argument("graph", type=path_arg)
     validate.set_defaults(func=cmd_validate_graph)
 
     verify = sub.add_parser("audit-verify", help="verify the hash chain and the mirror")
@@ -134,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     boot.set_defaults(func=cmd_coldstart)
 
     dispatch = sub.add_parser("dispatch", help="cold start, then dispatch every ready node")
-    dispatch.add_argument("graph", type=Path)
+    dispatch.add_argument("graph", type=path_arg)
     dispatch.add_argument("--graph-id")
     dispatch.set_defaults(func=cmd_dispatch)
     return parser
