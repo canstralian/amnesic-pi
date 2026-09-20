@@ -1,22 +1,24 @@
+"""Read-only posture verification.
+
+This module is the stable name for "check the live kernel state against the
+intended security posture". The checks themselves live in `authority` (network
+authority) and `torpath` (post-Tor egress posture); this is the seam the CLI
+and the tests use.
+
+Nothing here mutates the system. If a check cannot be performed, it fails --
+an unprovable posture is not a passing posture.
+"""
+
 from __future__ import annotations
 
 import socket
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 
+from .authority import Authority, Check
 from .config import Config
 
-
-@dataclass(frozen=True)
-class Check:
-    name: str
-    ok: bool
-    detail: str
-
-
-def _read_sysctl(path: str) -> str:
-    return Path(path).read_text(encoding="utf-8").strip()
+__all__ = ["Check", "verify", "tor_listener_checks"]
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -31,41 +33,32 @@ def _port_open(port: int) -> bool:
         return False
 
 
-def verify(config: Config) -> list[Check]:
-    checks: list[Check] = []
+def tor_listener_checks(config: Config) -> list[Check]:
+    """Confirm the configured Tor listeners exist.
 
-    nft = _run("nft", "list", "table", "inet", "amnesic_pi")
-    checks.append(Check("nft table", nft.returncode == 0, nft.stderr.strip() or "present"))
-
-    text = nft.stdout
-    for chain in ("input", "forward", "output"):
-        marker = f"chain {chain}"
-        start = text.find(marker)
-        segment = text[start : start + 700] if start >= 0 else ""
-        ok = start >= 0 and "policy drop" in segment.lower()
-        checks.append(Check(f"{chain} policy DROP", ok, "drop" if ok else "not proven"))
-
-    try:
-        forwarding = _read_sysctl("/proc/sys/net/ipv4/ip_forward")
-    except OSError as exc:
-        forwarding = f"error:{exc}"
-    checks.append(Check("IPv4 forwarding", forwarding == "1", forwarding))
-
-    ipv6_values: list[str] = []
-    for path in (
-        "/proc/sys/net/ipv6/conf/all/disable_ipv6",
-        "/proc/sys/net/ipv6/conf/default/disable_ipv6",
-    ):
-        try:
-            ipv6_values.append(_read_sysctl(path))
-        except OSError:
-            ipv6_values.append("missing")
-    checks.append(Check("IPv6 disabled", all(v == "1" for v in ipv6_values), ",".join(ipv6_values)))
-
-    checks.append(Check("Tor TransPort", _port_open(config.trans_port), str(config.trans_port)))
-    # Tor DNSPort is UDP and cannot be proven with a TCP connect probe; listener state is checked via ss.
+    A listener existing is a hard gate; it is not evidence that traffic leaves
+    through Tor. That claim belongs to `torpath.verify_tor_path`, which runs
+    after Tor has bootstrapped.
+    """
+    checks = [Check("Tor TransPort", _port_open(config.trans_port), str(config.trans_port))]
+    # DNSPort is UDP and cannot be proven with a TCP connect probe; listener
+    # state is read from `ss` instead.
     ss = _run("ss", "-H", "-lun")
-    dns_marker = f":{config.dns_port}"
-    checks.append(Check("Tor DNSPort", ss.returncode == 0 and dns_marker in ss.stdout, dns_marker))
-
+    marker = f":{config.dns_port}"
+    checks.append(Check("Tor DNSPort", ss.returncode == 0 and marker in ss.stdout, marker))
     return checks
+
+
+def verify(
+    config: Config,
+    authority: Authority | None = None,
+    template: Path | None = None,
+) -> list[Check]:
+    """Full read-only check: network authority posture plus Tor listeners."""
+    if authority is None:
+        authority = (
+            Authority.default(config, template=template)
+            if template is not None
+            else Authority.default(config)
+        )
+    return authority.verify() + tor_listener_checks(config)

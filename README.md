@@ -13,13 +13,19 @@ Amnesic Pi is an experimental Raspberry Pi security appliance. It combines Raspb
 ## Stage 1 objective
 
 ```text
-BOOT -> FIREWALL DENY -> TOR -> VERIFY -> TOR-ONLY CLIENT CONNECTIVITY
-                     \\-> any failure -> DENY
+TOPOLOGY -> MAC RANDOMIZE + READBACK -> ZERO-IP -> FIREWALL APPLY
+         -> FIREWALL VERIFY -> FORWARDING ENABLE -> NETWORK -> TOR
+         -> TOR-PATH VERIFY -> READY
+                            \\-> any failure before READY -> LOCKDOWN -> DENY
 ```
 
 The core rule is simple:
 
 > **Network authority is absent by default.** An application wanting a socket does not grant it authority to reach the Internet.
+
+And the rule that makes it enforceable:
+
+> **Ordering is not authority.** `Before=` only says "run me first"; if the unit fails, the target is still reached. The network manager, Tor and the posture verifier are `BindsTo=` the firewall unit, which is a lifetime relationship.
 
 Stage 1 is intentionally narrow. It proves the network and amnesia invariants before adding convenience features such as Wi-Fi AP mode, DHCP, browser integration, persistence UI, or image publishing.
 
@@ -35,6 +41,22 @@ Stage 1 is intentionally narrow. It proves the network and amnesia invariants be
 8. Stopping or crashing Tor must remove connectivity rather than expose clearnet.
 9. Runtime root-filesystem changes disappear after reboot once OverlayFS is enabled.
 10. Persistent storage is separate, opt-in, and outside the Stage 1 base system.
+11. Forwarding is off at boot and is granted **only** inside a firewall transaction that has already verified the installed policy.
+12. Each role interface gets a randomized MAC, verified by readback, before the network manager may start.
+13. The network manager and Tor cannot start without the firewall unit, and cannot outlive it.
+14. No Tor-dependent check runs before Tor; no pre-network check depends on the network.
+
+### What Stage 1 does not claim
+
+`BindsTo=` tracks **systemd unit state**, not **nftables kernel state**. If root
+runs `nft flush ruleset` while the firewall unit is still `active (exited)`,
+systemd sees nothing and the bound units keep running. Stage 1 therefore does
+not claim "policy loss implies connectivity loss". See
+[THREAT-MODEL.md](THREAT-MODEL.md#known-limitation-out-of-band-nftables-mutation).
+
+Exit-IP rotation is also **not** an invariant: successive Tor circuits are not
+guaranteed to use distinct exits, so "a different exit every request" is not a
+release gate.
 
 ## Reference topology
 
@@ -95,7 +117,9 @@ Primary target:
 - USB-to-Ethernet adapter for downstream traffic
 - local keyboard/display during initial firewall deployment
 
-Pi 3 and Pi 4 should also be viable with current Raspberry Pi OS ARM64, but the release gate is hardware-tested primarily on Pi 5.
+Pi 3 and Pi 4 should also be viable with current Raspberry Pi OS ARM64.
+
+> **No Raspberry Pi hardware testing has been performed on the current authority model.** The automated evidence covers unit behaviour, kernel/namespace packet authority, and the resolved systemd graph. Hardware behaviour -- including whether a given USB-Ethernet adapter accepts runtime MAC changes, device enumeration timing, interface naming stability, and the real boot sequence -- is **[UNVERIFIED]**. See [docs/verification.md](docs/verification.md#unverified-on-hardware).
 
 ## Repository layout
 
@@ -113,22 +137,40 @@ amnesic-pi/
 ├── network/
 │   └── policy.nft.in
 ├── systemd/
-│   ├── amnesic-pi-firewall.service
-│   ├── amnesic-pi-verify.service
+│   ├── install-map.tsv               # single source of truth for unit install paths
+│   ├── amnesic-pi-anon.service       # phase 1: MAC + zero-IP
+│   ├── amnesic-pi-firewall.service   # the authority transaction
+│   ├── amnesic-pi-lockdown.service   # OnFailure target
+│   ├── amnesic-pi-posture.service    # phase 2: Tor-path verification
+│   ├── amnesic-pi-ready.target       # READY
+│   ├── networkd-amnesic-pi.conf      # BindsTo drop-in
+│   ├── NetworkManager-amnesic-pi.conf
 │   └── tor-amnesic-pi.conf
 ├── src/amnesic_pi/
-│   ├── cli.py
+│   ├── anon.py        # amnesic-pi-anon entry point
+│   ├── fw.py          # amnesic-pi-firewall entry point
+│   ├── cli.py         # amnesic-pi umbrella
+│   ├── authority.py   # apply / verify / lockdown
+│   ├── mac.py         # MAC generation + verified readback
+│   ├── netif.py       # interface primitives
+│   ├── nft.py         # nftables invocation and inspection
+│   ├── sysctl.py      # forwarding state
+│   ├── torpath.py     # post-Tor posture verification
 │   ├── config.py
-│   ├── firewall.py
+│   ├── firewall.py    # policy rendering
 │   └── verify.py
 ├── image/
 │   └── provision.sh
 ├── scripts/
 │   └── check-amnesia.sh
 └── tests/
+    ├── test_anon.py               # MAC gate behaviour
+    ├── test_authority.py          # transaction fail-closed
+    ├── test_systemd.py            # resolved dependency graph
+    ├── test_netns_fail_closed.py  # packet-level failure injection
+    ├── test_torpath.py
     ├── test_config.py
     ├── test_firewall.py
-    ├── test_systemd.py
     ├── test_torrc.py
     └── integration/
         └── fail_closed.sh
@@ -160,6 +202,16 @@ TRANS_PORT=9040
 DNS_PORT=5353
 SOCKS_PORT=9050
 TOR_USER=debian-tor
+IFACE_WAIT_SECONDS=20
+```
+
+Confirm each adapter accepts a runtime MAC change. This is the step that
+exposes an unsupported USB-Ethernet adapter, and it must pass before the
+appliance can boot:
+
+```bash
+sudo amnesic-pi-anon randomize-mac
+sudo amnesic-pi-anon verify-zero-ip
 ```
 
 Review the rendered policy before applying it:
@@ -171,27 +223,55 @@ sudo amnesic-pi render-firewall | less
 Then, from a local console:
 
 ```bash
-sudo amnesic-pi apply-firewall
-sudo sysctl --system
+sudo amnesic-pi-firewall apply     # installs policy, verifies it, then grants forwarding
+sudo amnesic-pi-firewall verify    # read-only re-check
 sudo systemctl restart tor@default.service
-sudo amnesic-pi verify
+sudo amnesic-pi-anon verify-tor-path
 sudo nft list table inet amnesic_pi
+```
+
+`apply` fails closed: if anything in the transaction fails it runs `lockdown`
+itself, so a nonzero exit already means forwarding is off. To close the
+appliance down deliberately:
+
+```bash
+sudo amnesic-pi-firewall lockdown
 ```
 
 Only after manual validation succeeds:
 
 ```bash
+sudo systemctl enable amnesic-pi-anon.service
 sudo systemctl enable amnesic-pi-firewall.service
 sudo systemctl enable tor@default.service
-sudo systemctl enable amnesic-pi-verify.service
+sudo systemctl enable amnesic-pi-posture.service
+sudo systemctl enable amnesic-pi-ready.target
 sudo reboot
 ```
+
+> Stopping `amnesic-pi-firewall.service` now stops the network manager and Tor
+> with it, and installs an unconditional deny posture. That is intentional:
+> at a pre-ready security boundary, connectivity loss beats accidental clearnet
+> forwarding. Keep a local console.
 
 The complete installation, downstream client setup, leak tests, OverlayFS procedure, maintenance transition, and release gate are in **[BUILD.md](BUILD.md)**.
 
 ## Fail-closed test
 
-The repository includes a root-only integration scaffold:
+Packet-level failure injection runs in CI, under real Linux network namespaces
+rather than mocks:
+
+```bash
+sudo python -m pytest -m netns
+```
+
+Three namespaces (client, gateway, uplink) carry the real transaction against
+the real policy template. For every pre-ready failure boundary, the uplink
+namespace must observe zero packets from the client subnet. A positive control
+runs first, so a detector that cannot see packets fails the suite rather than
+passing it.
+
+The repository also includes a root-only on-appliance scaffold:
 
 ```bash
 sudo tests/integration/fail_closed.sh
@@ -240,9 +320,12 @@ sudo ./scripts/check-amnesia.sh verify
 Do not describe a release as fail-closed until the candidate passes all of the following on target hardware:
 
 ```text
-[ ] unit/static tests
-[ ] nftables syntax validation
-[ ] firewall boot-order validation
+[x] unit/static tests                       (automated)
+[x] resolved systemd dependency graph       (automated)
+[x] systemd-analyze verify                  (automated)
+[x] namespace packet-level fail-closed      (automated, root + netns)
+[ ] nftables syntax validation on target
+[ ] MAC randomization accepted by each adapter in use
 [ ] Tor bootstrap validation
 [ ] Tor-stop denial test
 [ ] downstream clearnet-denial test
@@ -251,6 +334,9 @@ Do not describe a release as fail-closed until the candidate passes all of the f
 [ ] IPv6 leak test
 [ ] reboot-amnesia test
 ```
+
+The checked items run in CI. The unchecked items require target hardware and
+have not been performed.
 
 ## Threat boundary
 
