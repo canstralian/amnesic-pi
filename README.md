@@ -25,7 +25,7 @@ Stage 1 is intentionally narrow. It proves the network and amnesia invariants be
 
 ## Security invariants
 
-1. Client traffic has no ordinary clearnet forwarding path; kernel IPv4 forwarding remains disabled.
+1. Client traffic has no ordinary clearnet forwarding path; the live `forward` base chain is empty with policy `DROP`.
 2. `input`, `forward`, and `output` use default `DROP` policies.
 3. Tor is the only normal process granted outbound Internet TCP authority.
 4. Downstream TCP is redirected into Tor's `TransPort`.
@@ -114,6 +114,7 @@ amnesic-pi/
 │   └── policy.nft.in
 ├── systemd/
 │   ├── amnesic-pi-firewall.service
+│   ├── amnesic-pi-firewall-failure.service
 │   ├── amnesic-pi-verify.service
 │   └── tor-amnesic-pi.conf
 ├── src/amnesic_pi/
@@ -172,6 +173,7 @@ Then, from a local console:
 
 ```bash
 sudo amnesic-pi apply-firewall
+sudo amnesic-pi verify-firewall
 sudo sysctl --system
 sudo systemctl restart tor@default.service
 sudo amnesic-pi verify
@@ -184,10 +186,11 @@ Only after manual validation succeeds:
 sudo systemctl enable amnesic-pi-firewall.service
 sudo systemctl enable tor@default.service
 sudo systemctl enable amnesic-pi-verify.service
+sudo amnesic-pi verify-enforced-mode
 sudo reboot
 ```
 
-Enabling `amnesic-pi-firewall.service` also installs a hard `NetworkManager.service` requirement. If the firewall cannot activate on boot, NetworkManager must not start.
+Enabling `amnesic-pi-firewall.service` installs the `NetworkManager.service.requires` link; before enablement that requirement does not exist. `verify-enforced-mode` checks the installed link and the effective `Requires=`/`After=` graph, including drop-ins. Firewall startup also runs a live nftables post-check before ordered network services are released.
 
 The complete installation, downstream client setup, leak tests, OverlayFS procedure, maintenance transition, and release gate are in **[BUILD.md](BUILD.md)**.
 
@@ -244,6 +247,8 @@ Do not describe a release as fail-closed until the candidate passes all of the f
 ```text
 [ ] unit/static tests
 [ ] nftables syntax validation
+[ ] enforced-mode dependency validation
+[ ] firewall-failure boot injection
 [ ] firewall boot-order validation
 [ ] Tor bootstrap validation
 [ ] Tor-stop denial test
