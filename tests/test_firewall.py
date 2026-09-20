@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from amnesic_pi.config import Config
@@ -16,9 +17,11 @@ def test_render_removes_tokens():
 def test_base_chains_are_default_drop():
     out = render(TEMPLATE, Config("eth0", "eth1"), 123).lower()
     for chain in ("input", "forward", "output"):
-        start = out.index(f"chain {chain}")
-        section = out[start : start + 800]
-        assert "policy drop" in section
+        pattern = (
+            rf"chain\s+{chain}\s*\{{\s*"
+            rf"type\s+filter\s+hook\s+{chain}\s+priority\s+filter;\s*policy\s+drop;"
+        )
+        assert re.search(pattern, out) is not None
 
 
 def test_no_generic_forward_accept():
