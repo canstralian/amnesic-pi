@@ -274,7 +274,12 @@ The loader validates the candidate transaction before replacing the existing Amn
 
 ## 11. Apply kernel network policy
 
-Only after the firewall exists:
+`sudo amnesic-pi apply-firewall` (step 10) already enabled IPv4 forwarding
+itself, in the same process, immediately after confirming the nftables
+transaction succeeded — that is the only place forwarding is ever turned on.
+It is not set by `/etc/sysctl.d/99-amnesic-pi.conf`, and running
+`sysctl --system` will not report a `net.ipv4.ip_forward` line originating
+from that file. Still run it for the other hardening sysctls it does carry:
 
 ```bash
 sudo sysctl --system
@@ -301,7 +306,9 @@ sysctl net.ipv6.conf.default.disable_ipv6
 
 Both should report `1`.
 
-The intended sequencing is firewall first, IP forwarding second.
+The intended sequencing is firewall first, IP forwarding second — and,
+unlike earlier images, that sequencing is now enforced by the firewall's own
+code path rather than by systemd ordering alone.
 
 ---
 
@@ -388,6 +395,54 @@ sudo systemctl status \
   amnesic-pi-verify.service \
   --no-pager
 ```
+
+### Recovery if the network stack does not come up
+
+As of this release, `NetworkManager.service` and `systemd-networkd.service`
+are each bound (`BindsTo=`) to `amnesic-pi-firewall.service`. If the
+firewall fails to start, whichever of the two your image runs will not
+start either — this is deliberate: no network stack authority without a
+loaded firewall. Do this from the **local console** (HDMI + keyboard); do
+not attempt first-time recovery over SSH, since SSH itself depends on the
+network stack that may now be down.
+
+Diagnose:
+
+```bash
+sudo systemctl status amnesic-pi-firewall.service --no-pager
+sudo journalctl -u amnesic-pi-firewall.service --no-pager -n 50
+```
+
+Common causes: a bad `/etc/amnesic-pi/network.env` (re-check with
+`sudo amnesic-pi render-firewall`), a missing `debian-tor` user, or an `nft`
+validation failure. Fix the underlying cause, then bring the chain back up
+in order — do not skip straight to starting the network unit, since it will
+immediately fail again with nothing to bind to:
+
+```bash
+sudo systemctl restart amnesic-pi-firewall.service
+sudo systemctl status amnesic-pi-firewall.service --no-pager
+sudo systemctl restart NetworkManager.service   # or systemd-networkd.service
+```
+
+If you need network access purely to diagnose the firewall failure itself
+(for example, to fetch a package), that is an explicit, local,
+console-present, conscious decision to fail open — not something this
+guide automates. Temporarily removing the drop-in and reloading systemd is
+the mechanism:
+
+```bash
+sudo mv /etc/systemd/system/NetworkManager.service.d/10-amnesic-pi.conf /root/
+sudo systemctl daemon-reload
+sudo systemctl start NetworkManager.service
+# ... diagnose and fix ...
+sudo mv /root/10-amnesic-pi.conf /etc/systemd/system/NetworkManager.service.d/
+sudo systemctl daemon-reload
+sudo systemctl restart amnesic-pi-firewall.service
+sudo systemctl restart NetworkManager.service
+```
+
+Re-run `sudo amnesic-pi verify` before considering the appliance restored.
 
 ---
 
@@ -631,6 +686,9 @@ Do **not** describe a release as fail-closed until the exact release candidate p
 [ ] no generic downstream UDP/QUIC escape
 [ ] no IPv6 escape path
 [ ] boot ordering restores the firewall before network authority
+[ ] stopping amnesic-pi-firewall.service also stops the active network manager
+[ ] a forced firewall start failure (e.g. invalid network.env) leaves NetworkManager/systemd-networkd inactive
+[ ] IP forwarding is never enabled independently of firewall success
 [ ] amnesic-pi verify passes
 [ ] OverlayFS is enabled
 [ ] reboot-amnesia probe disappears

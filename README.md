@@ -33,8 +33,10 @@ Stage 1 is intentionally narrow. It proves the network and amnesia invariants be
 6. Other downstream UDP, including QUIC, is denied.
 7. IPv6 is disabled until equivalent leak-proof policy and tests exist.
 8. Stopping or crashing Tor must remove connectivity rather than expose clearnet.
-9. Runtime root-filesystem changes disappear after reboot once OverlayFS is enabled.
-10. Persistent storage is separate, opt-in, and outside the Stage 1 base system.
+9. NetworkManager/systemd-networkd cannot start, and stop if already running, when the firewall service is not active.
+10. IPv4 forwarding is enabled only by the firewall service itself, after a successful load, never unconditionally at boot.
+11. Runtime root-filesystem changes disappear after reboot once OverlayFS is enabled.
+12. Persistent storage is separate, opt-in, and outside the Stage 1 base system.
 
 ## Reference topology
 

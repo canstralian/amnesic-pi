@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from amnesic_pi.config import Config
-from amnesic_pi.firewall import render
+from amnesic_pi.firewall import FirewallError, enable_ipv4_forwarding, render
 
 TEMPLATE = Path("network/policy.nft.in").read_text()
 
@@ -43,3 +45,16 @@ def test_template_does_not_flush_global_ruleset():
     text = TEMPLATE.lower()
     assert "flush ruleset" not in text
     assert "flush table" not in text
+
+
+def test_enable_ipv4_forwarding_writes_one(tmp_path: Path):
+    target = tmp_path / "ip_forward"
+    target.write_text("0")
+    enable_ipv4_forwarding(target)
+    assert target.read_text() == "1\n"
+
+
+def test_enable_ipv4_forwarding_raises_on_write_failure(tmp_path: Path):
+    missing_parent = tmp_path / "no-such-dir" / "ip_forward"
+    with pytest.raises(FirewallError):
+        enable_ipv4_forwarding(missing_parent)

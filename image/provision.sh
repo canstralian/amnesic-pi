@@ -49,6 +49,14 @@ install -m 0644 "$repo_root/systemd/amnesic-pi-verify.service" /etc/systemd/syst
 install -d -m 0755 /etc/systemd/system/tor@default.service.d
 install -m 0644 "$repo_root/systemd/tor-amnesic-pi.conf" /etc/systemd/system/tor@default.service.d/10-amnesic-pi.conf
 
+# NetworkManager and systemd-networkd are bound to firewall success: a drop-in
+# for a unit that is not installed on this image is simply never loaded, so
+# both are shipped unconditionally rather than guessed from the OS release.
+install -d -m 0755 /etc/systemd/system/NetworkManager.service.d
+install -m 0644 "$repo_root/systemd/network-manager-amnesic-pi.conf" /etc/systemd/system/NetworkManager.service.d/10-amnesic-pi.conf
+install -d -m 0755 /etc/systemd/system/systemd-networkd.service.d
+install -m 0644 "$repo_root/systemd/systemd-networkd-amnesic-pi.conf" /etc/systemd/system/systemd-networkd.service.d/10-amnesic-pi.conf
+
 systemctl daemon-reload
 
 cat <<'EOF'

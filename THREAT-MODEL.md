@@ -33,6 +33,7 @@ Persistent data must live outside the ephemeral root and require an explicit des
 - accidental UDP/QUIC use by clients
 - DNS leakage from downstream clients
 - Tor process failure
+- amnesic-pi-firewall.service failing to start, or stopping/crashing after boot
 - service-ordering mistakes during boot
 - an unexpected client interface trying ordinary forwarding
 - accidental IPv6 leakage
@@ -49,6 +50,7 @@ Persistent data must live outside the ephemeral root and require an explicit des
 - application-layer identity leaks
 - hostile USB peripherals
 - RF side channels
+- network stacks other than NetworkManager and systemd-networkd (e.g., dhcpcd, wicd)
 - compromise of a downstream client
 - forensic recovery from RAM while powered
 
@@ -72,6 +74,28 @@ Persistent data must live outside the ephemeral root and require an explicit des
 ```
 
 The Linux kernel, nftables, Tor package, Raspberry Pi firmware, and base OS packages are trusted computing base components.
+
+## Boot-time authority ordering
+
+Sequencing alone (`Before=`/`After=`) does not stop a dependent unit from
+starting if the unit it is ordered after fails; only `Requires=`/`BindsTo=`
+does. Stage 1 relies on hard dependencies, not comments, for this:
+
+- `NetworkManager.service` and `systemd-networkd.service` each carry a
+  `BindsTo=amnesic-pi-firewall.service` drop-in. Neither can start unless the
+  firewall started successfully, and a later firewall stop or crash stops
+  whichever one is active. Both drop-ins ship unconditionally; a drop-in for
+  a unit that is not installed on a given image is simply never loaded, so
+  this does not require guessing which network stack is present.
+- `net.ipv4.ip_forward` is not set by the unconditional boot-time sysctl
+  file. It is enabled only by `amnesic-pi apply-firewall` itself, in the same
+  process, immediately after its `nft -f` transaction is confirmed to have
+  succeeded. There is no path that turns on forwarding without the
+  forward-drop table already being live.
+
+Other Stage 1 network stacks (dhcpcd, wicd, or anything else that does not
+match one of the two units above) are out of scope: verify which network
+manager an image actually runs before relying on this guarantee.
 
 ## Fail-closed interpretation
 

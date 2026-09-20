@@ -41,3 +41,16 @@ def render(template: str, config: Config, uid: int) -> str:
 
 def render_file(template_path: Path, config: Config, uid: int) -> str:
     return render(template_path.read_text(encoding="utf-8"), config, uid)
+
+
+IP_FORWARD_PATH = Path("/proc/sys/net/ipv4/ip_forward")
+
+
+def enable_ipv4_forwarding(path: Path = IP_FORWARD_PATH) -> None:
+    """Turn on IPv4 forwarding. Callers must only invoke this after the
+    nftables transaction that installs the forward-drop policy has already
+    succeeded, never unconditionally at boot."""
+    try:
+        path.write_text("1\n", encoding="utf-8")
+    except OSError as exc:
+        raise FirewallError(f"failed to enable IPv4 forwarding: {exc}") from exc

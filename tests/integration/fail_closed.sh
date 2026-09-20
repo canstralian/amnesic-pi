@@ -34,3 +34,35 @@ fi
 
 echo "PASS: local direct TCP egress remained denied with Tor stopped."
 echo "NOTE: run the downstream-client denial test before release; this script does not prove that path."
+
+# A later firewall failure/stop must take the active network manager down
+# with it, not merely have preceded it at boot. Detect whichever of
+# NetworkManager/systemd-networkd this image actually runs; skip cleanly if
+# neither is installed rather than silently declaring the check satisfied.
+net_unit=""
+for candidate in NetworkManager.service systemd-networkd.service; do
+  if systemctl list-unit-files --no-legend "$candidate" >/dev/null 2>&1 \
+    && systemctl list-unit-files --no-legend "$candidate" | grep -q "$candidate"; then
+    net_unit="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$net_unit" ]]; then
+  echo "SKIP: neither NetworkManager.service nor systemd-networkd.service is installed on this image." >&2
+else
+  if ! systemctl is-active --quiet "$net_unit"; then
+    echo "SKIP: $net_unit is not active; cannot prove BindsTo stop-propagation from an inactive baseline." >&2
+  else
+    systemctl stop amnesic-pi-firewall.service
+    sleep 1
+    if systemctl is-active --quiet "$net_unit"; then
+      echo "FAIL: $net_unit remained active after amnesic-pi-firewall.service was stopped." >&2
+      systemctl start amnesic-pi-firewall.service
+      exit 1
+    fi
+    echo "PASS: stopping amnesic-pi-firewall.service also stopped $net_unit."
+    systemctl start amnesic-pi-firewall.service
+    systemctl start "$net_unit"
+  fi
+fi

@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 from .config import ConfigError, load_env
-from .firewall import FirewallError, render_file, tor_uid
+from .firewall import FirewallError, enable_ipv4_forwarding, render_file, tor_uid
 from .verify import verify
 
 DEFAULT_CONFIG = Path("/etc/amnesic-pi/network.env")
@@ -64,9 +64,18 @@ def cmd_apply(args: argparse.Namespace) -> int:
             print("candidate nftables policy failed validation; existing ruleset untouched", file=sys.stderr)
             return check.returncode
         apply = subprocess.run(["nft", "-f", str(candidate)], check=False)
-        return apply.returncode
+        if apply.returncode != 0:
+            return apply.returncode
     finally:
         candidate.unlink(missing_ok=True)
+
+    # Only ever turn on forwarding once the forward-drop table is confirmed live.
+    try:
+        enable_ipv4_forwarding()
+    except FirewallError as exc:
+        print(f"firewall render error: {exc}", file=sys.stderr)
+        return 2
+    return 0
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
