@@ -60,7 +60,8 @@ GATES: tuple[Gate, ...] = (
         upstream="DATA_CLEAN",
         passes_when=(
             "nft -c accepts the rendered ruleset, input/forward/output remain default DROP, "
-            "no IPv6 path exists, and every egress principal is explicit and documented"
+            "the forward chain contains no rules, no IPv6 path exists, and every egress "
+            "principal is explicit and documented"
         ),
     ),
     Gate(
@@ -68,8 +69,9 @@ GATES: tuple[Gate, ...] = (
         owner_team="runtime",
         upstream="TRAIN_CONVERGED",
         passes_when=(
-            "ruff and pytest pass, no shell interpolation is unquoted, and a config parse "
-            "failure provably leaves a known-good ruleset installed"
+            "ruff and pytest pass, firewall activation includes a live post-apply policy "
+            "check, no shell interpolation is unquoted, and a config parse failure leaves "
+            "a known-good ruleset installed"
         ),
     ),
     Gate(
@@ -96,8 +98,9 @@ GATES: tuple[Gate, ...] = (
         owner_team="platform",
         upstream="INFRA_READY",
         passes_when=(
-            "provisioning is reproducible on Raspberry Pi OS Lite ARM64, OverlayFS amnesia "
-            "is confirmed across reboot, and the maintenance-mode transition is tested"
+            "provisioning is reproducible on Raspberry Pi OS Lite ARM64, enforced mode "
+            "proves NetworkManager requires and starts after the firewall with no Condition "
+            "skip, OverlayFS amnesia is confirmed, and maintenance mode is tested"
         ),
     ),
     Gate(
@@ -172,8 +175,6 @@ class GateResult:
         if missing:
             raise SchemaError(f"gate result is missing keys: {', '.join(sorted(missing))}")
         evidence = raw["evidence"]
-        # A bare string is iterable, so tuple() used to split "looks fine" into
-        # ten characters, which then satisfied the non-empty evidence rule.
         if isinstance(evidence, str) or not isinstance(evidence, (list, tuple)):
             raise SchemaError(
                 f"gate {raw['gate']} evidence must be a list of strings, got "
