@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import ConfigError, load_env
 from .firewall import FirewallError, render_file, tor_uid
-from .verify import verify
+from .verify import Check, verify, verify_enforced_mode, verify_firewall
 
 DEFAULT_CONFIG = Path("/etc/amnesic-pi/network.env")
 DEFAULT_TEMPLATE = Path("/usr/share/amnesic-pi/policy.nft.in")
@@ -19,6 +19,16 @@ def _load(path: Path):
         return load_env(path)
     except (OSError, ConfigError) as exc:
         raise SystemExit(f"configuration error: {exc}") from exc
+
+
+def _print_checks(checks: list[Check]) -> int:
+    width = max(len(c.name) for c in checks)
+    failed = False
+    for check in checks:
+        status = "PASS" if check.ok else "FAIL"
+        failed |= not check.ok
+        print(f"{status:4}  {check.name:<{width}}  {check.detail}")
+    return 1 if failed else 0
 
 
 def cmd_render(args: argparse.Namespace) -> int:
@@ -70,15 +80,15 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    config = _load(args.config)
-    checks = verify(config)
-    width = max(len(c.name) for c in checks)
-    failed = False
-    for check in checks:
-        status = "PASS" if check.ok else "FAIL"
-        failed |= not check.ok
-        print(f"{status:4}  {check.name:<{width}}  {check.detail}")
-    return 1 if failed else 0
+    return _print_checks(verify(_load(args.config)))
+
+
+def cmd_verify_firewall(_args: argparse.Namespace) -> int:
+    return _print_checks(verify_firewall())
+
+
+def cmd_verify_enforced_mode(_args: argparse.Namespace) -> int:
+    return _print_checks(verify_enforced_mode())
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -97,6 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify_cmd = sub.add_parser("verify")
     verify_cmd.set_defaults(func=cmd_verify)
+
+    verify_firewall_cmd = sub.add_parser("verify-firewall")
+    verify_firewall_cmd.set_defaults(func=cmd_verify_firewall)
+
+    verify_mode_cmd = sub.add_parser("verify-enforced-mode")
+    verify_mode_cmd.set_defaults(func=cmd_verify_enforced_mode)
     return parser
 
 
