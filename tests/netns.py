@@ -186,7 +186,18 @@ class Topology:
         self.exec(self.gateway_ns, ["sysctl", "-qw", f"net.ipv4.ip_forward={value}"])
 
     def uplink_packets_from_client(self) -> int:
-        """Packets the uplink namespace saw from the client subnet."""
+        """Packets the uplink namespace saw from the client subnet.
+
+        Read only; there is deliberately no reset helper. `nft reset counters`
+        exits 0 but silently does nothing to an ANONYMOUS (inline) counter like
+        the one in the observer rule -- it only resets named counter objects.
+        A reset here would therefore report stale totals while looking like it
+        worked, which in this harness means a leak count that is quietly wrong.
+
+        Each test gets a fresh Topology instead, so every counter starts at 0
+        by construction. If you need a mid-test baseline, tear the observer
+        table down and reinstall it rather than resetting it.
+        """
         listing = self.exec(self.uplink_ns, ["nft", "list", "table", "inet", "observer"]).stdout
         for line in listing.splitlines():
             if "counter" in line and CLIENT_SUBNET in line:
