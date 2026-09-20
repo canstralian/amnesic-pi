@@ -7,6 +7,7 @@ must refuse to run from READ_ONLY rather than proceeding unverified.
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -16,7 +17,7 @@ from typing import Callable
 import pytest
 
 from orchestrator.audit import AuditLog
-from orchestrator.cli import build_parser, main
+from orchestrator.cli import build_parser, main, path_arg
 from orchestrator.errors import TopologyError
 
 GOOD_GRAPH = {
@@ -181,3 +182,35 @@ def test_main_exits_zero_on_a_clean_readout(monkeypatch, manifest_path: Path):
     with pytest.raises(SystemExit) as excinfo:
         main()
     assert excinfo.value.code == 0
+
+
+# --- empty path arguments are refused by name, not by errno ---
+
+
+def test_empty_path_argument_is_refused():
+    """Path("") is Path("."), so an empty value used to surface as an errno
+    about a directory the operator never typed."""
+    with pytest.raises(argparse.ArgumentTypeError, match="must not be empty"):
+        path_arg("")
+    with pytest.raises(argparse.ArgumentTypeError, match="must not be empty"):
+        path_arg("   ")
+
+
+def test_path_argument_accepts_a_real_path():
+    assert path_arg("orchestration/topology.toml") == Path("orchestration/topology.toml")
+
+
+@pytest.mark.parametrize("flag", ["--manifest", "--audit", "--mirror"])
+def test_empty_flag_value_exits_two_and_names_the_flag(flag, capsys):
+    """argparse exits 2 for a bad argument value and names the option."""
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args([flag, "", "topology"])
+    assert excinfo.value.code == 2
+    assert flag in capsys.readouterr().err
+
+
+def test_empty_graph_positional_exits_two(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args(["validate-graph", ""])
+    assert excinfo.value.code == 2
+    assert "graph" in capsys.readouterr().err
