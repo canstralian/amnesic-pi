@@ -19,6 +19,12 @@ If Tor is unavailable, misconfigured, stopped, or not yet ready, client traffic 
 
 In normal mode, only the Tor daemon receives outbound Internet TCP authority. DHCP required to acquire the uplink address is separately and narrowly permitted.
 
+### P2a0. Containment does not share a failure mode with what it contains
+
+`amnesic-pi-firewall lockdown` reads no configuration. A malformed
+`network.env` must not be able to break both the firewall unit and the
+`OnFailure=` lockdown that exists to contain it.
+
 ### P2a. Forwarding authority is transactional
 
 Forwarding does not exist until `amnesic-pi-firewall apply` has installed the nftables policy and verified it against the live kernel. No boot-time sysctl, and no other unit, can grant it. Every failure path within the transaction runs `lockdown`, which disables forwarding before it touches nftables.

@@ -6,8 +6,10 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from .authority import AuthorityError, lockdown_succeeded
+from .authority import AuthorityError, lockdown, lockdown_succeeded
 from .clihelp import add_common, authority_for, report, require_root
+from .nft import Nft
+from .sysctl import Sysctl
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
@@ -31,11 +33,18 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_lockdown(args: argparse.Namespace) -> int:
+    """Tear the appliance down. Deliberately does NOT load the configuration.
+
+    systemd runs this from OnFailure= and ExecStop=. If a typo in
+    /etc/amnesic-pi/network.env is what made the firewall unit fail, handing
+    that same file to lockdown would make the containment fail for the same
+    reason and leave forwarding enabled. Lockdown needs nothing from it: the
+    forwarding knobs and the deny ruleset are constants.
+    """
     denied = require_root("amnesic-pi-firewall lockdown")
     if denied is not None:
         return denied
-    authority = authority_for(args)
-    checks = authority.lockdown()
+    checks = lockdown(Nft.default(), Sysctl())
     report(checks)
     return 0 if lockdown_succeeded(checks) else 1
 

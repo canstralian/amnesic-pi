@@ -140,22 +140,62 @@ def test_verify_passes_against_the_live_kernel(topology: netns.Topology, tmp_pat
 
 
 def test_topology_failure_denies_forwarding(topology: netns.Topology, tmp_path: Path):
-    """An interface that never appears must stop the transaction."""
-    env = write_env(tmp_path, topology, CLIENT_IF="ap-does-not-exist")
+    """An interface that never appears must stop the transaction.
+
+    The name has to be a *valid* interface name that simply does not exist --
+    an over-long one would be rejected by config validation instead, and this
+    test would silently exercise the config path rather than the topology one.
+    """
+    # Start with forwarding ON, so a passing assertion below proves the failed
+    # transaction actively turned it off rather than never turning it on.
+    topology.set_forwarding("1")
+    env = write_env(tmp_path, topology, CLIENT_IF="apmissing0")
     result = firewall(topology, env, "apply")
     assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "topology" in combined, f"did not fail on topology: {combined}"
     assert gateway_forwarding(topology) == "0"
     assert_no_clearnet(topology, "topology failure")
 
 
-def test_unparsable_config_denies_forwarding(topology: netns.Topology, tmp_path: Path):
-    """A configuration parse failure must not grant authority either."""
-    env = tmp_path / "broken.env"
-    env.write_text("UPLINK_IF=eth0\nNOT_A_KEY=1\n", encoding="utf-8")
-    result = firewall(topology, env, "apply")
+def test_unparsable_config_is_contained_by_the_lockdown_unit(
+    topology: netns.Topology, tmp_path: Path
+):
+    """A config parse failure, containment, and the invariant that binds them.
+
+    `apply` deliberately does NOT lock down on a parse failure: AGENTS.md
+    requires that a configuration parse failure must not flush a known-good
+    ruleset. Containment is systemd's job -- OnFailure= runs the lockdown unit.
+
+    The trap is that lockdown used to parse the same config, so a typo in
+    network.env made the firewall unit AND its containment fail together and
+    left forwarding on. This drives both steps in order.
+    """
+    # A known-good posture first, so "not flushed" means something.
+    good = write_env(tmp_path, topology, filename="good.env")
+    assert firewall(topology, good, "apply").returncode == 0
+    assert gateway_forwarding(topology) == "1"
+
+    broken = tmp_path / "broken.env"
+    broken.write_text("UPLINK_IF=eth0\nNOT_A_KEY=1\n", encoding="utf-8")
+
+    # Step 1: apply refuses, and leaves the known-good ruleset in place.
+    result = firewall(topology, broken, "apply")
     assert result.returncode != 0
+    assert "NOT_A_KEY" in (result.stdout + result.stderr)
+    still_installed = topology.exec(
+        topology.gateway_ns, ["nft", "list", "table", "inet", "amnesic_pi"], check=False
+    )
+    assert still_installed.returncode == 0, "a parse failure flushed the known-good ruleset"
+
+    # Step 2: what OnFailure= runs. It must work despite the same broken config.
+    cleanup = firewall(topology, broken, "lockdown")
+    assert cleanup.returncode == 0, (
+        "lockdown failed on the same config that broke apply: "
+        + cleanup.stdout + cleanup.stderr
+    )
     assert gateway_forwarding(topology) == "0"
-    assert_no_clearnet(topology, "configuration failure")
+    assert_no_clearnet(topology, "configuration failure contained by lockdown")
 
 
 def test_nftables_apply_failure_denies_forwarding(topology: netns.Topology, tmp_path: Path):
@@ -240,8 +280,22 @@ def test_lockdown_is_idempotent_against_the_live_kernel(
     assert_no_clearnet(topology, "after repeated lockdown")
 
 
-def test_no_transaction_means_no_forwarding(topology: netns.Topology):
-    """The pre-anon state: nothing has run yet, so nothing may forward."""
+def test_shipped_sysctl_baseline_turns_inherited_forwarding_off(topology: netns.Topology):
+    """The pre-anon state: nothing has run yet, so nothing may forward.
+
+    A new network namespace inherits net.ipv4.ip_forward from the host, so this
+    is not a given: on a runner with Docker installed the namespace starts with
+    forwarding already ON. The assertion is that the appliance's own
+    `config/99-amnesic-pi.conf` -- the file systemd-sysctl applies at boot --
+    turns it back off.
+    """
+    topology.set_forwarding("1")
+    assert gateway_forwarding(topology) == "1", "could not set up the inherited-forwarding case"
+
+    applied = topology.apply_sysctl_baseline()
+    assert applied.get("net.ipv4.ip_forward") == "0", (
+        "the shipped sysctl baseline does not pin IPv4 forwarding to 0"
+    )
     assert gateway_forwarding(topology) == "0"
     assert_no_clearnet(topology, "before any stage has run")
 

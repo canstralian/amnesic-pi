@@ -84,6 +84,70 @@ class Check:
     detail: str
 
 
+def lockdown(nft: Nft, sysctl: Sysctl) -> list[Check]:
+    """Fail-safe, idempotent teardown. Requires no configuration at all.
+
+    This deliberately takes no Config. Disabling forwarding and installing an
+    unconditional deny posture needs nothing from /etc/amnesic-pi/network.env:
+    the knobs and the deny ruleset are both constants. Requiring a parseable
+    config here would mean a typo in that file defeats the very mechanism meant
+    to contain a failure -- the firewall unit would fail on the bad config, and
+    OnFailure= would hand the same bad config to lockdown.
+
+    Order matters: forwarding is disabled first, so a later nftables failure
+    cannot leave the appliance forwarding clearnet traffic. Safe after a
+    partial apply and safe to run repeatedly.
+    """
+    checks: list[Check] = []
+
+    failed = sysctl.disable_forwarding()
+    checks.append(
+        Check(
+            "forwarding disabled",
+            not failed,
+            "all forwarding knobs are 0" if not failed else f"could not write: {', '.join(failed)}",
+        )
+    )
+
+    # The deny posture goes in first. Its chains hook at priority -300, well
+    # ahead of the policy table's filter chains, so once it is loaded nothing
+    # the policy table permits can still take effect. Removing the policy table
+    # first would instead open a window with no table at all, where the
+    # kernel's own accept defaults apply.
+    try:
+        nft.delete_table(LOCKDOWN_TABLE_NAME)
+        result = nft.load(LOCKDOWN_RULESET)
+        installed = result.returncode == 0
+        detail = "deny posture installed" if installed else (result.stderr or "").strip()
+    except NftError as exc:
+        installed, detail = False, str(exc)
+    checks.append(Check("deny posture installed", installed, detail))
+
+    try:
+        nft.delete_table(TABLE_NAME)
+        removed, removed_detail = True, f"{TABLE_NAME} removed"
+    except NftError as exc:
+        removed, removed_detail = False, str(exc)
+    checks.append(Check("policy table removed", removed, removed_detail))
+
+    checks.extend(forwarding_checks(sysctl, expect_ipv4="0"))
+    return checks
+
+
+def forwarding_checks(sysctl: Sysctl, expect_ipv4: str = "1") -> list[Check]:
+    """Read-only forwarding-state checks. Needs no configuration."""
+    checks: list[Check] = []
+    ipv4 = sysctl.read(IPV4_FORWARD)
+    checks.append(
+        Check("IPv4 forwarding", ipv4 == expect_ipv4, f"{ipv4} (expected {expect_ipv4})")
+    )
+    for knob in (IPV6_FORWARD_ALL, IPV6_FORWARD_DEFAULT):
+        value = sysctl.read(knob)
+        # Absent means IPv6 is compiled out, which satisfies the invariant.
+        checks.append(Check(knob, value in {"0", None}, "absent" if value is None else value))
+    return checks
+
+
 @dataclass(frozen=True)
 class Authority:
     config: Config
@@ -347,17 +411,7 @@ class Authority:
 
     def verify_forwarding(self, expect_ipv4: str = "1") -> list[Check]:
         """Read-only forwarding-state checks."""
-        checks: list[Check] = []
-        ipv4 = self.sysctl.read(IPV4_FORWARD)
-        checks.append(
-            Check("IPv4 forwarding", ipv4 == expect_ipv4, f"{ipv4} (expected {expect_ipv4})")
-        )
-        for knob in (IPV6_FORWARD_ALL, IPV6_FORWARD_DEFAULT):
-            value = self.sysctl.read(knob)
-            # Absent means IPv6 is compiled out, which satisfies the invariant.
-            ok = value in {"0", None}
-            checks.append(Check(knob, ok, "absent" if value is None else value))
-        return checks
+        return forwarding_checks(self.sysctl, expect_ipv4)
 
     def verify(self, expect_ipv4_forwarding: str = "1") -> list[Check]:
         """Full read-only posture check: policy plus forwarding state."""
@@ -366,46 +420,12 @@ class Authority:
     # -- lockdown ----------------------------------------------------------
 
     def lockdown(self) -> list[Check]:
-        """Fail-safe, idempotent teardown.
+        """Fail-safe, idempotent teardown; see the module-level `lockdown`.
 
-        Order matters: forwarding is disabled first, so that a later nftables
-        failure cannot leave the appliance forwarding clearnet traffic. Safe
-        after a partial apply and safe to run repeatedly.
+        Delegates so that the teardown path is identical whether or not a
+        Config could be loaded.
         """
-        checks: list[Check] = []
-
-        failed = self.sysctl.disable_forwarding()
-        checks.append(
-            Check(
-                "forwarding disabled",
-                not failed,
-                "all forwarding knobs are 0" if not failed else f"could not write: {', '.join(failed)}",
-            )
-        )
-
-        # The deny posture goes in first. Its chains hook at priority -300, well
-        # ahead of the policy table's filter chains, so once it is loaded
-        # nothing the policy table permits can still take effect. Removing the
-        # policy table first would instead open a window with no table at all,
-        # where the kernel's own accept defaults apply.
-        try:
-            self.nft.delete_table(LOCKDOWN_TABLE_NAME)
-            result = self.nft.load(LOCKDOWN_RULESET)
-            installed = result.returncode == 0
-            detail = "deny posture installed" if installed else (result.stderr or "").strip()
-        except NftError as exc:
-            installed, detail = False, str(exc)
-        checks.append(Check("deny posture installed", installed, detail))
-
-        try:
-            self.nft.delete_table(TABLE_NAME)
-            removed, removed_detail = True, f"{TABLE_NAME} removed"
-        except NftError as exc:
-            removed, removed_detail = False, str(exc)
-        checks.append(Check("policy table removed", removed, removed_detail))
-
-        checks.extend(self.verify_forwarding(expect_ipv4="0"))
-        return checks
+        return lockdown(self.nft, self.sysctl)
 
 
 def lockdown_succeeded(checks: Sequence[Check]) -> bool:

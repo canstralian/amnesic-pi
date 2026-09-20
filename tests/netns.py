@@ -23,6 +23,11 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# The appliance's shipped sysctl baseline. Applied to the gateway namespace
+# exactly as systemd-sysctl applies it at boot, so the tests exercise the file
+# that actually ships rather than whatever the host happens to default to.
+SYSCTL_BASELINE = Path(__file__).resolve().parent.parent / "config" / "99-amnesic-pi.conf"
+
 CLIENT_ADDR = "10.77.0.2"
 GATEWAY_CLIENT_ADDR = "10.77.0.1"
 GATEWAY_UPLINK_ADDR = "10.88.0.1"
@@ -108,7 +113,35 @@ class Topology:
              "via", GATEWAY_UPLINK_ADDR])
 
         self._install_uplink_counter()
+        self.apply_sysctl_baseline()
         return self
+
+    def apply_sysctl_baseline(self) -> dict[str, str]:
+        """Apply the shipped sysctl baseline to the gateway namespace.
+
+        A new network namespace INHERITS net.ipv4.ip_forward from the host, so
+        a runner with Docker installed (host forwarding on) hands every fresh
+        namespace forwarding already enabled. Without this the tests would be
+        asserting the host's configuration rather than the appliance's, and
+        would pass or fail depending on where CI happened to run.
+
+        This is the same thing systemd-sysctl does at boot, from the same file,
+        which is why it is a baseline rather than a workaround.
+        """
+        applied: dict[str, str] = {}
+        for raw in SYSCTL_BASELINE.read_text(encoding="utf-8").splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if not line or "=" not in line:
+                continue
+            key, value = (part.strip() for part in line.split("=", 1))
+            # A namespace may legitimately lack IPv6 knobs; a key that is not
+            # present cannot grant anything, so skipping it is safe.
+            result = self.exec(
+                self.gateway_ns, ["sysctl", "-qw", f"{key}={value}"], check=False
+            )
+            if result.returncode == 0:
+                applied[key] = value
+        return applied
 
     def _configure(self, namespace: str, iface: str, address: str) -> None:
         run(["ip", "netns", "exec", namespace, "ip", "addr", "add", address, "dev", iface])

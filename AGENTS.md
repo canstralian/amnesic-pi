@@ -19,6 +19,9 @@ This repository treats network policy as a security boundary.
   failure paths.
 - `lockdown` disables forwarding before it touches nftables, and stays
   idempotent and safe after a partial apply.
+- `lockdown` takes no configuration. Containment must not share a failure mode
+  with the thing it contains: a malformed network.env must not break both the
+  firewall unit and the lockdown that OnFailure= runs to clean up after it.
 - Network consumers are `BindsTo=` the firewall unit. Do not downgrade one to
   `Before=`, `Wants=` or `After=`: ordering is not authority.
 - Nothing in the pre-network stage may depend on Tor or the network. Nothing

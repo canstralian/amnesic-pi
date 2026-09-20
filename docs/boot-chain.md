@@ -97,6 +97,33 @@ a failure, so `OnFailure=` never fires for it.
 `lockdown` is idempotent and disables forwarding before it touches nftables, so
 running it twice, or after a partial apply, is safe.
 
+### Lockdown takes no configuration
+
+`amnesic-pi-firewall lockdown` deliberately does not read
+`/etc/amnesic-pi/network.env`. The forwarding knobs and the deny ruleset are
+constants, so it needs nothing from that file.
+
+This is not an optimisation. If a typo in `network.env` is what made the
+firewall unit fail, then a lockdown that parsed the same file would fail for
+exactly the same reason -- the containment would share a failure mode with the
+thing it is meant to contain, and forwarding would stay enabled:
+
+```text
+network.env has a typo
+        -> amnesic-pi-firewall.service fails to parse it
+        -> OnFailure= runs amnesic-pi-lockdown.service
+        -> which fails to parse it too
+        -> forwarding stays on, with no policy
+```
+
+`apply` and `verify` do need the configuration, and still refuse to run without
+a valid one. Only the teardown path is config-free.
+
+Note also that `apply` does **not** lock down on a configuration parse failure:
+AGENTS.md requires that a parse failure must not flush a known-good ruleset, so
+the previous posture is left intact and containment is systemd's job via
+`OnFailure=`.
+
 ## Consequence of the lifetime binding
 
 Stopping `amnesic-pi-firewall.service` stops `systemd-networkd`,

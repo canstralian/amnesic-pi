@@ -8,6 +8,7 @@ leaves forwarding off.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -321,3 +322,61 @@ def test_apply_after_lockdown_restores_service(tmp_path: Path):
     tables = harness.tables
     assert "inet amnesic_pi_lockdown" not in tables
     assert harness.forwarding[IPV4_FORWARD] == "1"
+
+
+# -- lockdown must not depend on configuration ----------------------------
+
+
+def test_lockdown_needs_no_configuration(tmp_path: Path):
+    """The containment path must not share a failure mode with what it contains.
+
+    systemd runs lockdown from OnFailure= and ExecStop=. If a typo in
+    network.env is what made the firewall unit fail, a lockdown that parses
+    that same file fails for the same reason -- and forwarding stays on.
+    """
+    from amnesic_pi.authority import lockdown as config_free_lockdown
+
+    harness = build(tmp_path)
+    harness.authority.apply()
+    assert harness.forwarding[IPV4_FORWARD] == "1"
+
+    # No Config anywhere in this call.
+    checks = config_free_lockdown(harness.authority.nft, harness.authority.sysctl)
+    assert all(check.ok for check in checks), [
+        (c.name, c.detail) for c in checks if not c.ok
+    ]
+    assert harness.forwarding[IPV4_FORWARD] == "0"
+    assert "inet amnesic_pi_lockdown" in harness.tables
+
+
+def test_lockdown_command_runs_with_an_unparsable_config(tmp_path, monkeypatch):
+    """End to end through the CLI: a broken config must not block containment."""
+    from amnesic_pi import fw
+    from amnesic_pi.nft import Nft
+
+    nft = FakeNft()
+    sysctl = FakeSysctl.build(tmp_path / "proc")
+    sysctl.write(IPV4_FORWARD, "1")
+
+    monkeypatch.setattr(Nft, "default", staticmethod(nft.interface))
+    monkeypatch.setattr(fw, "Sysctl", lambda: sysctl)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+    broken = tmp_path / "broken.env"
+    broken.write_text("UPLINK_IF=eth0\nNOT_A_KEY=1\n", encoding="utf-8")
+
+    args = fw.build_parser().parse_args(["--config", str(broken), "lockdown"])
+    assert args.func(args) == 0, "lockdown refused to run because the config was broken"
+    assert sysctl.read(IPV4_FORWARD) == "0"
+
+
+def test_apply_still_refuses_an_unparsable_config(tmp_path, monkeypatch):
+    """apply must still fail on a bad config -- only lockdown is config-free."""
+    from amnesic_pi import fw
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    broken = tmp_path / "broken.env"
+    broken.write_text("UPLINK_IF=eth0\nNOT_A_KEY=1\n", encoding="utf-8")
+    args = fw.build_parser().parse_args(["--config", str(broken), "apply"])
+    with pytest.raises(SystemExit):
+        args.func(args)

@@ -113,7 +113,20 @@ Failure points injected, each asserting zero packets at the uplink:
 - lockdown after a successful apply;
 - repeated lockdown;
 - forwarding already enabled before a failing transaction -- the preserved
-  regression.
+  regression;
+- a configuration parse failure, driven through both steps: `apply` refuses and
+  leaves the known-good ruleset intact, then the lockdown unit contains it
+  despite being handed the same broken file.
+
+### A note on the namespace baseline
+
+A new network namespace **inherits `net.ipv4.ip_forward` from the host**. On a
+runner with Docker installed the host has forwarding on, so every fresh
+namespace starts with it enabled. The harness therefore applies the appliance's
+own `config/99-amnesic-pi.conf` to the gateway namespace, exactly as
+systemd-sysctl does at boot, instead of assuming an ambient default. Tests that
+assert "forwarding is off" would otherwise be measuring the host rather than
+the appliance, and would pass or fail depending on where CI ran.
 
 ## Hardware adversarial checks
 
