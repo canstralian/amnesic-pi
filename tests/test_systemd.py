@@ -1,10 +1,15 @@
 from pathlib import Path
 
 
-def test_firewall_precedes_forwarding_sysctl_and_network():
+def test_firewall_precedes_sysctl_and_network():
     text = Path("systemd/amnesic-pi-firewall.service").read_text()
-    assert "Before=systemd-sysctl.service network-pre.target" in text
+    assert "Before=systemd-sysctl.service network-pre.target NetworkManager.service" in text
     assert "DefaultDependencies=no" in text
+
+
+def test_enabling_firewall_makes_network_manager_require_it():
+    text = Path("systemd/amnesic-pi-firewall.service").read_text()
+    assert "RequiredBy=NetworkManager.service" in text
 
 
 def test_tor_requires_firewall():
