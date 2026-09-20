@@ -280,7 +280,7 @@ Only after the firewall exists:
 sudo sysctl --system
 ```
 
-Verify forwarding:
+Verify forwarding remains disabled:
 
 ```bash
 sysctl net.ipv4.ip_forward
@@ -289,7 +289,7 @@ sysctl net.ipv4.ip_forward
 Expected:
 
 ```text
-net.ipv4.ip_forward = 1
+net.ipv4.ip_forward = 0
 ```
 
 Verify Stage 1 IPv6 disablement:
@@ -301,7 +301,7 @@ sysctl net.ipv6.conf.default.disable_ipv6
 
 Both should report `1`.
 
-The intended sequencing is firewall first, IP forwarding second.
+Stage 1 does not enable kernel IPv4 forwarding. Transparent nftables redirects deliver downstream TCP and DNS to local Tor listeners without creating an ordinary routed client path.
 
 ---
 
@@ -343,7 +343,7 @@ PASS nft table
 PASS input policy DROP
 PASS forward policy DROP
 PASS output policy DROP
-PASS IPv4 forwarding
+PASS IPv4 forwarding disabled
 PASS IPv6 disabled
 PASS Tor TransPort
 PASS Tor DNSPort
@@ -362,6 +362,8 @@ sudo systemctl enable amnesic-pi-firewall.service
 sudo systemctl enable tor@default.service
 sudo systemctl enable amnesic-pi-verify.service
 ```
+
+Enabling the firewall unit creates a `NetworkManager.service.requires` dependency. The firewall is also ordered before NetworkManager, so a failed firewall activation must block NetworkManager rather than allowing networking to continue.
 
 Check:
 
