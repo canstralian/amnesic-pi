@@ -5,6 +5,6 @@ After=local-fs.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/echo Amnesic Pi firewall startup or verification failed; networking remains blocked. Repair from the local console.
+ExecStart=/bin/echo Amnesic Pi firewall startup or verification failed - networking remains blocked. Repair from the local console.
 StandardOutput=journal+console
 StandardError=journal+console
