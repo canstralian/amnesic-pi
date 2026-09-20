@@ -2,7 +2,7 @@
 Description=Amnesic Pi fail-closed firewall
 DefaultDependencies=no
 After=local-fs.target
-Before=systemd-sysctl.service network-pre.target tor@default.service tor.service
+Before=systemd-sysctl.service network-pre.target NetworkManager.service tor@default.service tor.service
 Wants=network-pre.target
 
 [Service]
@@ -12,3 +12,4 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=sysinit.target
+RequiredBy=NetworkManager.service
