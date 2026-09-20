@@ -45,6 +45,7 @@ fi
 install -m 0644 "$repo_root/config/torrc" /etc/tor/torrc
 
 install -m 0644 "$repo_root/systemd/amnesic-pi-firewall.service" /etc/systemd/system/amnesic-pi-firewall.service
+install -m 0644 "$repo_root/systemd/amnesic-pi-firewall-failure.service" /etc/systemd/system/amnesic-pi-firewall-failure.service
 install -m 0644 "$repo_root/systemd/amnesic-pi-verify.service" /etc/systemd/system/amnesic-pi-verify.service
 install -d -m 0755 /etc/systemd/system/tor@default.service.d
 install -m 0644 "$repo_root/systemd/tor-amnesic-pi.conf" /etc/systemd/system/tor@default.service.d/10-amnesic-pi.conf
