@@ -34,7 +34,18 @@ class Runner:
     @staticmethod
     def default() -> Runner:
         def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(list(argv), text=True, capture_output=True, check=False)
+            try:
+                return subprocess.run(list(argv), text=True, capture_output=True, check=False)
+            except OSError as exc:
+                # A missing or unexecutable binary must look like a failed
+                # command, not an exception. Callers decide what a failure
+                # means -- `ethtool` missing degrades to "permanent address
+                # unknown", while `ip` or `nft` missing is a hard failure --
+                # and neither can make that decision from a traceback.
+                # 127 is the conventional "command not found" status.
+                return subprocess.CompletedProcess(
+                    args=list(argv), returncode=127, stdout="", stderr=f"{argv[0]}: {exc}"
+                )
 
         return Runner(run=_run)
 

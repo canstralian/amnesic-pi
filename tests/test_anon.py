@@ -397,3 +397,50 @@ def test_randomize_mac_does_not_reach_the_network(tmp_path, monkeypatch):
         ["--config", str(write_env(tmp_path)), "randomize-mac"]
     )
     assert args.func(args) == 0
+
+
+# -- missing tooling -------------------------------------------------------
+
+
+def test_missing_binary_is_a_failed_command_not_an_exception(tmp_path: Path, monkeypatch):
+    """A binary that is absent must surface as a nonzero result.
+
+    `subprocess.run` raises `FileNotFoundError` for a missing executable. If
+    that escapes, callers cannot distinguish an optional tool being absent
+    (`ethtool`, which should degrade) from a required one (`ip`, `nft`, which
+    must fail closed) -- and the operator gets a traceback instead of a reason.
+    """
+    monkeypatch.setenv("PATH", str(tmp_path))
+    result = netif.Runner.default().run(["definitely-not-installed", "--version"])
+    assert result.returncode != 0
+    assert "definitely-not-installed" in result.stderr
+
+
+def test_randomization_degrades_when_ethtool_is_absent(tmp_path: Path):
+    """`ethtool` is optional: without it the permanent address is unknown.
+
+    The previous address still stands in as a prohibited value, so the gate
+    keeps working -- it just cannot name the burned-in address.
+    """
+    kernel = FakeKernel(
+        sysfs=tmp_path / "net",
+        # permanent=None models both a driver with no permaddr (veth) and a
+        # host with no ethtool installed.
+        nics={"eth0": FakeNic(address=BURNED_IN, permanent=None)},
+    )
+    result = randomize_interface("eth0", kernel.interfaces(), wait_seconds=5)
+    assert result.permanent is None
+    assert result.assigned != BURNED_IN
+
+
+def test_missing_ip_command_fails_closed(tmp_path: Path, monkeypatch):
+    """`ip` is required. Its absence must be a clean MacError, not a traceback."""
+    monkeypatch.setenv("PATH", str(tmp_path))
+    sysfs = tmp_path / "net" / "eth0"
+    sysfs.mkdir(parents=True)
+    (sysfs / "address").write_text(BURNED_IN + "\n", encoding="utf-8")
+    interfaces = netif.NetworkInterfaces(
+        runner=netif.Runner.default(), sysfs=tmp_path / "net"
+    )
+    with pytest.raises(MacError, match="rejected"):
+        randomize_interface("eth0", interfaces, wait_seconds=1)
