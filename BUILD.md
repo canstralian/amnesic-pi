@@ -260,6 +260,7 @@ From the local console:
 
 ```bash
 sudo amnesic-pi apply-firewall
+sudo amnesic-pi verify-firewall
 ```
 
 Inspect the live table:
@@ -280,7 +281,7 @@ Only after the firewall exists:
 sudo sysctl --system
 ```
 
-Verify forwarding remains disabled:
+Verify the Stage 1 forwarding state:
 
 ```bash
 sysctl net.ipv4.ip_forward
@@ -289,7 +290,7 @@ sysctl net.ipv4.ip_forward
 Expected:
 
 ```text
-net.ipv4.ip_forward = 0
+net.ipv4.ip_forward = 1
 ```
 
 Verify Stage 1 IPv6 disablement:
@@ -301,7 +302,15 @@ sysctl net.ipv6.conf.default.disable_ipv6
 
 Both should report `1`.
 
-Stage 1 does not enable kernel IPv4 forwarding. Transparent nftables redirects deliver downstream TCP and DNS to local Tor listeners without creating an ordinary routed client path.
+Also verify IPv6 forwarding remains disabled:
+
+```bash
+sysctl net.ipv6.conf.all.forwarding
+```
+
+Expected: `0`.
+
+Stage 1 permits IPv4 forwarding so transparent interception does not depend on forwarding-off behavior. The clearnet-denial control is the live nftables `forward` base chain: `policy drop` with zero rules. A verifier failure on that chain is release-blocking.
 
 ---
 
@@ -361,9 +370,13 @@ Only after manual validation succeeds:
 sudo systemctl enable amnesic-pi-firewall.service
 sudo systemctl enable tor@default.service
 sudo systemctl enable amnesic-pi-verify.service
+sudo amnesic-pi verify-enforced-mode
+sudo systemd-analyze verify amnesic-pi-firewall.service NetworkManager.service tor@default.service
 ```
 
-Enabling the firewall unit creates a `NetworkManager.service.requires` dependency. The firewall is also ordered before NetworkManager, so a failed firewall activation must block NetworkManager rather than allowing networking to continue.
+`RequiredBy=NetworkManager.service` is install-time state: the requirement edge exists only after `systemctl enable` creates the `.requires` symlink. `verify-enforced-mode` checks that installed link, the effective `Requires=` and `After=` relationships, effective drop-ins for any `Condition*=` skip path, and the manual-stop guard.
+
+The firewall service runs `amnesic-pi verify-firewall` as `ExecStartPost=`. NetworkManager is ordered after the complete firewall start transaction, including that live post-check.
 
 Check:
 
@@ -389,7 +402,16 @@ sudo systemctl status \
   tor@default.service \
   amnesic-pi-verify.service \
   --no-pager
+sudo amnesic-pi verify-enforced-mode
 ```
+
+If firewall startup or its post-check fails, enforced mode intentionally leaves NetworkManager down. The failure is written to the journal and local console. After fixing the cause, recover from the local console with:
+
+```bash
+sudo systemctl reset-failed amnesic-pi-firewall.service && sudo systemctl start amnesic-pi-firewall.service NetworkManager.service
+```
+
+Direct `stop`/`restart` of the firewall unit is refused to avoid accidentally propagating a network teardown into an SSH session. Do not remove that guard as a recovery shortcut.
 
 ---
 
@@ -632,6 +654,8 @@ Do **not** describe a release as fail-closed until the exact release candidate p
 [ ] no direct downstream DNS leakage
 [ ] no generic downstream UDP/QUIC escape
 [ ] no IPv6 escape path
+[ ] enforced-mode dependency check passes
+[ ] firewall-failure injection leaves NetworkManager down
 [ ] boot ordering restores the firewall before network authority
 [ ] amnesic-pi verify passes
 [ ] OverlayFS is enabled
