@@ -120,3 +120,28 @@ def test_verify_module_reports_firewall_and_listener_checks(tmp_path, monkeypatc
     assert "nft table" in names
     assert "Tor TransPort" in names
     assert "Tor DNSPort" in names
+
+
+def test_verify_reports_a_failed_check_when_ss_is_missing(monkeypatch):
+    """An absent `ss` must produce a FAIL row, not a FileNotFoundError.
+
+    The same defect class as the missing `ethtool`/`ip`/`nft` crash, in the one
+    module that had kept its own `subprocess.run`. `verify` promises that a
+    check which cannot be performed fails, and a traceback is not a failed
+    check. Without this the module raises on any host without iproute2, and
+    `test_verify_module_reports_firewall_and_listener_checks` above errors
+    rather than asserting.
+    """
+    from amnesic_pi import netif
+    from amnesic_pi import verify as verify_module
+
+    def missing(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(netif.subprocess, "run", missing)
+    monkeypatch.setattr(verify_module, "_port_open", lambda port: False)
+
+    checks = verify_module.tor_listener_checks(Config("eth0", "eth1"))
+
+    dns = next(check for check in checks if check.name == "Tor DNSPort")
+    assert dns.ok is False

@@ -17,12 +17,16 @@ from pathlib import Path
 
 from .authority import Authority, Check
 from .config import Config
+from .netif import Runner
 
 __all__ = ["Check", "verify", "tor_listener_checks"]
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, text=True, capture_output=True, check=False)
+    # Via Runner.default(), so an absent binary becomes returncode 127 rather
+    # than a FileNotFoundError. A probe that cannot run is a failed check, and
+    # this module promises a FAIL row rather than a traceback.
+    return Runner.default().run(args)
 
 
 def _port_open(port: int) -> bool:
@@ -45,7 +49,9 @@ def tor_listener_checks(config: Config) -> list[Check]:
     # state is read from `ss` instead.
     ss = _run("ss", "-H", "-lun")
     marker = f":{config.dns_port}"
-    checks.append(Check("Tor DNSPort", ss.returncode == 0 and marker in ss.stdout, marker))
+    checks.append(
+        Check("Tor DNSPort", ss.returncode == 0 and marker in (ss.stdout or ""), marker)
+    )
     return checks
 
 
