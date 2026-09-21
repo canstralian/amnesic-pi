@@ -8,6 +8,7 @@ leaves forwarding off.
 
 from __future__ import annotations
 
+import argparse
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -380,3 +381,346 @@ def test_apply_still_refuses_an_unparsable_config(tmp_path, monkeypatch):
     args = fw.build_parser().parse_args(["--config", str(broken), "apply"])
     with pytest.raises(SystemExit):
         args.func(args)
+
+
+# -- R1: verification must establish EXCLUSIVE egress authority -----------
+#
+# The defect these cover: `verify` searched the whole output chain for
+# `oifname "<uplink>"` and for `skuid <tor>` separately. Both terms are still
+# present when an unrestricted grant is added beside the Tor rule, so the
+# verifier passed a policy that authorized every local process to reach the
+# Internet. Exclusivity cannot be established by looking for terms; it needs
+# every rule in the chain accounted for.
+
+
+def with_template(harness: Harness, text: str, tmp_path: Path) -> Authority:
+    candidate = tmp_path / "candidate.nft.in"
+    candidate.write_text(text, encoding="utf-8")
+    return Authority(
+        config=harness.authority.config,
+        nft=harness.authority.nft,
+        sysctl=harness.authority.sysctl,
+        interfaces=harness.authority.interfaces,
+        template=candidate,
+        uid=TOR_UID,
+    )
+
+
+def failing(checks) -> dict[str, str]:
+    return {check.name: check.detail for check in checks if not check.ok}
+
+
+TOR_GRANT = 'oifname "@UPLINK_IF@" meta skuid @TOR_UID@ meta l4proto tcp accept'
+
+
+def test_verify_rejects_an_added_unrestricted_egress_grant(tmp_path: Path):
+    """The exact candidate from the PR #9 review: a second, UID-less TCP grant.
+
+    Every term the old check looked for is still present -- the Tor rule is
+    untouched and the chain is still bound to the uplink. What changed is that
+    one more rule now grants the same egress to everything else on the host.
+    """
+    harness = build(tmp_path)
+    broad = TEMPLATE.read_text(encoding="utf-8").replace(
+        TOR_GRANT, TOR_GRANT + '\n        oifname "@UPLINK_IF@" meta l4proto tcp accept'
+    )
+    authority = with_template(harness, broad, tmp_path)
+
+    with pytest.raises(AuthorityError, match="unaccounted egress grant"):
+        authority.apply()
+
+    # Fail closed, not just fail loud.
+    assert harness.forwarding[IPV4_FORWARD] == "0"
+    assert "inet amnesic_pi_lockdown" in harness.tables
+
+
+def test_verify_rejects_a_grant_for_a_uid_that_is_not_tor(tmp_path: Path):
+    harness = build(tmp_path)
+    swapped = TEMPLATE.read_text(encoding="utf-8").replace(
+        TOR_GRANT, 'oifname "@UPLINK_IF@" meta skuid 0 meta l4proto tcp accept'
+    )
+    authority = with_template(harness, swapped, tmp_path)
+
+    with pytest.raises(AuthorityError) as raised:
+        authority.apply()
+    assert "Tor UID holds the uplink TCP grant" in str(raised.value)
+    assert harness.forwarding[IPV4_FORWARD] == "0"
+
+
+def test_verify_rejects_an_egress_grant_for_a_non_tcp_protocol(tmp_path: Path):
+    """UDP egress under the Tor UID is not the grant the threat model allows."""
+    harness = build(tmp_path)
+    widened = TEMPLATE.read_text(encoding="utf-8").replace(
+        TOR_GRANT, TOR_GRANT + '\n        oifname "@UPLINK_IF@" meta l4proto udp accept'
+    )
+    authority = with_template(harness, widened, tmp_path)
+
+    with pytest.raises(AuthorityError, match="unaccounted egress grant"):
+        authority.apply()
+    assert harness.forwarding[IPV4_FORWARD] == "0"
+
+
+def test_the_shipped_template_carries_only_documented_exceptions(tmp_path: Path):
+    """The negative tests above are worthless if the real template fails too."""
+    harness = build(tmp_path)
+    harness.authority.apply()
+    assert failing(harness.authority.verify()) == {}
+
+    # Every exception the output chain is allowed to carry is named, so adding
+    # one is a reviewable act rather than an accident.
+    assert set(harness.authority.allowed_output_rules().values()) == {
+        "loopback",
+        "established and related connections",
+        "uplink DHCP, broadcast destination",
+        "uplink DHCP, unspecified destination",
+    }
+
+
+def test_verify_rejects_a_redirect_with_the_wrong_protocol(tmp_path: Path):
+    """The old check found `iifname` and the port in the chain, not in a rule.
+
+    A redirect that sends UDP where TCP was meant leaves both terms present and
+    hands client traffic to a port Tor is not listening on for that protocol.
+    """
+    harness = build(tmp_path)
+    wrong = TEMPLATE.read_text(encoding="utf-8").replace(
+        'iifname "@CLIENT_IF@" meta l4proto tcp redirect to :@TRANS_PORT@',
+        'iifname "@CLIENT_IF@" meta l4proto udp redirect to :@TRANS_PORT@',
+    )
+    authority = with_template(harness, wrong, tmp_path)
+
+    with pytest.raises(AuthorityError) as raised:
+        authority.apply()
+    assert "client TCP -> Tor TransPort" in str(raised.value)
+    assert harness.forwarding[IPV4_FORWARD] == "0"
+
+
+def test_verify_rejects_a_redirect_bound_to_the_wrong_interface(tmp_path: Path):
+    harness = build(tmp_path)
+    wrong = TEMPLATE.read_text(encoding="utf-8").replace(
+        'iifname "@CLIENT_IF@" meta l4proto tcp redirect to :@TRANS_PORT@',
+        'iifname "@UPLINK_IF@" meta l4proto tcp redirect to :@TRANS_PORT@',
+    )
+    authority = with_template(harness, wrong, tmp_path)
+
+    with pytest.raises(AuthorityError, match="client TCP|unaccounted prerouting"):
+        authority.apply()
+    assert harness.forwarding[IPV4_FORWARD] == "0"
+
+
+def test_verify_rejects_an_extra_prerouting_rewrite(tmp_path: Path):
+    """prerouting has policy accept, so an unlisted rule there is live."""
+    harness = build(tmp_path)
+    extra = TEMPLATE.read_text(encoding="utf-8").replace(
+        'iifname "@CLIENT_IF@" udp dport 53 redirect to :@DNS_PORT@',
+        'iifname "@CLIENT_IF@" udp dport 53 redirect to :@DNS_PORT@\n'
+        '        iifname "@CLIENT_IF@" tcp dport 443 redirect to :8443',
+    )
+    authority = with_template(harness, extra, tmp_path)
+
+    with pytest.raises(AuthorityError, match="unaccounted prerouting rule"):
+        authority.apply()
+    assert harness.forwarding[IPV4_FORWARD] == "0"
+
+
+def test_a_counter_or_comment_does_not_change_rule_recognition(tmp_path: Path):
+    """Normalization must not become a way to smuggle a rule past the check."""
+    from amnesic_pi.nft import chain_rules
+
+    body = (
+        "type filter hook output priority filter; policy drop;\n"
+        '  oifname "eth0" meta skuid 4242 meta l4proto tcp counter packets 12 bytes 900 accept\n'
+        '  oifname "eth0" meta l4proto tcp accept comment "innocuous"\n'
+        "  # a source comment\n"
+    )
+    assert chain_rules(body) == [
+        'oifname "eth0" meta skuid 4242 meta l4proto tcp accept',
+        'oifname "eth0" meta l4proto tcp accept',
+    ]
+
+
+# -- R2: a failed containment must not discard the remaining firewall -----
+#
+# The defect these cover: lockdown deleted the policy table even when the deny
+# posture had failed to load, leaving NO table at all. Forwarding was off, but
+# forwarding governs the forward hook; it says nothing about traffic local
+# processes originate through the output hook.
+
+
+def test_failed_deny_install_retains_the_existing_policy(tmp_path: Path):
+    harness = build(tmp_path)
+    harness.authority.apply()
+    assert "inet amnesic_pi" in harness.tables
+
+    harness.nft.fail_load = True
+    checks = harness.authority.lockdown()
+
+    assert "inet amnesic_pi" in harness.tables, (
+        "lockdown discarded the only remaining firewall after failing to install "
+        "its replacement"
+    )
+    assert harness.forwarding[IPV4_FORWARD] == "0"
+    # The operator is told containment did not complete, rather than being told
+    # a retained policy is a success.
+    unmet = failing(checks)
+    assert "deny posture installed" in unmet
+    assert "retained" in unmet["policy table removed"]
+
+
+def test_failed_deny_install_never_leaves_an_empty_ruleset(tmp_path: Path):
+    """The appliance must never be left with no filtering whatsoever."""
+    harness = build(tmp_path, nft=FakeNft(fail_load=True))
+    harness.authority.lockdown()
+    harness.authority.lockdown()
+    assert harness.forwarding[IPV4_FORWARD] == "0"
+
+
+def test_failed_deny_install_is_reported_as_failed(tmp_path: Path):
+    from amnesic_pi.authority import lockdown_succeeded
+
+    harness = build(tmp_path, nft=FakeNft(fail_load=True))
+    assert not lockdown_succeeded(harness.authority.lockdown())
+
+
+def test_repeated_lockdown_replaces_the_deny_table_atomically(tmp_path: Path):
+    """A delete-then-load would leave an instant with no table at all.
+
+    By the second lockdown the policy table is already gone, so the deny table
+    is the only thing standing between the appliance and the kernel's accept
+    defaults. Replacing it has to be one transaction.
+    """
+    harness = build(tmp_path)
+    harness.authority.lockdown()
+    assert "inet amnesic_pi_lockdown" in harness.tables
+
+    harness.nft.fail_load = True
+    harness.authority.lockdown()
+
+    assert "inet amnesic_pi_lockdown" in harness.tables, (
+        "the deny posture was removed before its replacement was installed"
+    )
+    assert harness.forwarding[IPV4_FORWARD] == "0"
+
+
+def test_lockdown_reports_a_failed_forwarding_write_and_a_failed_load(tmp_path: Path):
+    """Combined failure: neither failure may be reported as containment."""
+    from amnesic_pi.authority import lockdown as config_free_lockdown
+
+    harness = build(tmp_path, nft=FakeNft(fail_load=True))
+    root = tmp_path / "unwritable-proc"
+    sysctl = FakeSysctl.build(root)
+    # A directory where the knob should be. File permissions would not do it:
+    # these commands run as root, and root writes through a read-only mode bit.
+    knob = root / IPV4_FORWARD
+    knob.unlink()
+    knob.mkdir()
+
+    checks = config_free_lockdown(harness.authority.nft, sysctl)
+    unmet = failing(checks)
+    assert "forwarding disabled" in unmet
+    assert "deny posture installed" in unmet
+
+
+# -- R3: the CLI must not claim more than it established ------------------
+#
+# The defect these cover: `cmd_apply` printed "appliance locked down" for every
+# AuthorityError, including the render failure that deliberately leaves the
+# previous policy in place and runs no containment at all -- and it discarded
+# the result of its own final verification, exiting 0 after printing FAIL.
+
+
+def cli_apply(monkeypatch, authority, capsys):
+    """Run the real cmd_apply against a supplied authority."""
+    from amnesic_pi import fw
+
+    monkeypatch.setattr(fw, "require_root", lambda _command: None)
+    monkeypatch.setattr(fw, "authority_for", lambda _args: authority)
+    code = fw.cmd_apply(argparse.Namespace())
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def test_apply_cli_does_not_claim_containment_after_a_render_error(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """The known-good policy is preserved on purpose -- and NOT locked down.
+
+    Both halves matter to an operator. Reporting this as containment would say
+    the appliance is denying traffic when it is in fact still forwarding under
+    the previous policy.
+    """
+    harness = build(tmp_path)
+    harness.authority.apply()
+    broken = with_template(harness, "", tmp_path)
+    broken = Authority(
+        config=broken.config,
+        nft=broken.nft,
+        sysctl=broken.sysctl,
+        interfaces=broken.interfaces,
+        template=tmp_path / "no-such-template.nft.in",
+        uid=TOR_UID,
+    )
+
+    code, _out, err = cli_apply(monkeypatch, broken, capsys)
+
+    assert code == 1
+    assert "NOT locked down" in err
+    assert "previously installed policy" in err
+    # The claim has to match the facts: nothing was torn down.
+    assert harness.forwarding[IPV4_FORWARD] == "1"
+    assert "inet amnesic_pi" in harness.tables
+
+
+def test_apply_cli_reports_containment_when_lockdown_ran(
+    tmp_path: Path, monkeypatch, capsys
+):
+    harness = build(tmp_path, nft=FakeNft(fail_check=True))
+
+    code, _out, err = cli_apply(monkeypatch, harness.authority, capsys)
+
+    assert code == 1
+    assert "appliance locked down" in err
+    assert harness.forwarding[IPV4_FORWARD] == "0"
+
+
+def test_apply_cli_reports_an_incomplete_lockdown_as_incomplete(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """apply failed AND containment failed. That is its own outcome."""
+    harness = build(tmp_path, nft=FakeNft(fail_check=True, fail_load=True))
+
+    code, _out, err = cli_apply(monkeypatch, harness.authority, capsys)
+
+    assert code == 1
+    assert "lockdown incomplete" in err
+    assert "appliance locked down:" not in err
+
+
+def test_apply_cli_exits_nonzero_when_the_final_verification_fails(
+    monkeypatch, capsys
+):
+    """The final `report(verify())` result must reach the exit code."""
+
+    class Mismatched:
+        def apply(self) -> None:
+            return None
+
+        def verify(self):
+            return [Check("post-grant posture", False, "injected mismatch")]
+
+    code, out, err = cli_apply(monkeypatch, Mismatched(), capsys)
+
+    assert "FAIL" in out
+    assert code == 1, "the CLI printed FAIL and reported success"
+    assert "failed verification" in err
+
+
+def test_apply_cli_exits_zero_on_a_verified_apply(tmp_path: Path, monkeypatch, capsys):
+    """The negative tests above prove nothing if the good path cannot pass."""
+    harness = build(tmp_path)
+
+    code, out, err = cli_apply(monkeypatch, harness.authority, capsys)
+
+    assert code == 0, err
+    assert "FAIL" not in out
+    assert harness.forwarding[IPV4_FORWARD] == "1"

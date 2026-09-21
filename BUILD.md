@@ -316,19 +316,30 @@ This is a single transaction: it verifies topology, forces every forwarding
 knob to 0, installs the policy, verifies the installed policy against the live
 kernel, and only then grants IPv4 forwarding.
 
-A nonzero exit **from the transaction** means it failed and already ran
-`lockdown`, so forwarding is off and an unconditional deny posture is
-installed.
+Three failures exit nonzero *before* the transaction starts and deliberately
+change nothing: a non-root invocation, a malformed
+`/etc/amnesic-pi/network.env` (which exits `configuration error: ...`), and a
+policy template that cannot be rendered (which exits `... the appliance was NOT
+locked down`). None of them runs `lockdown`, because a parse failure must not
+flush a known-good ruleset. Forwarding is left exactly as it was -- after an
+earlier successful `apply`, that means still enabled. As a systemd unit the
+firewall's `OnFailure=` runs `amnesic-pi-lockdown.service` and closes that
+window. Run by hand there is no such handler: correct the fault and re-run
+`apply`, or close the appliance down yourself with
+`sudo amnesic-pi-firewall lockdown`.
 
-Two failures exit nonzero *before* the transaction starts and deliberately
-change nothing: a non-root invocation, and a malformed
-`/etc/amnesic-pi/network.env`, which exits `configuration error: ...`. Neither
-runs `lockdown`, because a parse failure must not flush a known-good ruleset.
-Forwarding is left exactly as it was -- after an earlier successful `apply`,
-that means still enabled. As a systemd unit the firewall's `OnFailure=` runs
-`amnesic-pi-lockdown.service` and closes that window. Run by hand there is no
-such handler: correct the config and re-run `apply`, or close the appliance
-down yourself with `sudo amnesic-pi-firewall lockdown`.
+Once the transaction has begun touching the kernel, a nonzero exit means it
+failed **and** already ran `lockdown`. The message says how far that containment
+got, because these are not the same state:
+
+| Message contains | What is true |
+| --- | --- |
+| `appliance locked down` | `lockdown` ran and every one of its checks passed: forwarding is off and an unconditional deny posture is installed. |
+| `lockdown incomplete, posture unproven` | The transaction failed **and** the containment did not fully complete. Treat the posture as unproven. Work from a local console. |
+
+A zero exit means the transaction completed **and** the final read-only
+verification of the live posture passed. If that verification fails, the command
+prints the failing checks and exits nonzero rather than reporting success.
 
 Inspect the live table:
 
@@ -421,8 +432,9 @@ PASS  chain output
 PASS  forward chain has no accept
 PASS  client DNS -> Tor DNSPort 5353
 PASS  client TCP -> Tor TransPort 9040
-PASS  output chain bound to the uplink interface
+PASS  no unaccounted prerouting rule
 PASS  Tor UID holds the uplink TCP grant
+PASS  no unaccounted egress grant
 PASS  no unauthorized forward hook
 PASS  no source NAT of downstream traffic
 PASS  IPv4 forwarding

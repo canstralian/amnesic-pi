@@ -26,6 +26,7 @@ from .nft import (
     Nft,
     NftError,
     chain_body,
+    chain_rules,
     forward_hooks,
     nat_postrouting_masquerades,
     parse_chains,
@@ -73,8 +74,26 @@ LOCKDOWN_RULESET = f"""table {TABLE_FAMILY} {LOCKDOWN_TABLE_NAME} {{
 """
 
 
+# What an apply failure actually left behind. An operator reading "locked down"
+# needs it to mean the deny posture is installed -- not merely that something
+# went wrong somewhere.
+CONTAINMENT_PRESERVED = "prior policy preserved"
+CONTAINMENT_LOCKED_DOWN = "lockdown verified"
+CONTAINMENT_INCOMPLETE = "lockdown incomplete"
+
+
 class AuthorityError(RuntimeError):
-    pass
+    """A failure somewhere in the authority transaction.
+
+    `containment` records the resulting network state, so a caller can report
+    what is true rather than assuming the worst path ran. It is None when the
+    raising site did not establish one; callers must report that as unknown
+    rather than as containment.
+    """
+
+    def __init__(self, *args: object, containment: str | None = None) -> None:
+        super().__init__(*args)
+        self.containment = containment
 
 
 @dataclass(frozen=True)
@@ -114,35 +133,76 @@ def lockdown(nft: Nft, sysctl: Sysctl) -> list[Check]:
     # the policy table permits can still take effect. Removing the policy table
     # first would instead open a window with no table at all, where the
     # kernel's own accept defaults apply.
+    #
+    # Replacing any earlier deny table is one nft transaction rather than a
+    # delete followed by a load. A separate delete opens the same unfiltered
+    # window on a repeated lockdown, when the policy table is already gone and
+    # the deny table is briefly the only thing standing.
     try:
-        nft.delete_table(LOCKDOWN_TABLE_NAME)
-        result = nft.load(LOCKDOWN_RULESET)
+        replace = (
+            f"delete table {TABLE_FAMILY} {LOCKDOWN_TABLE_NAME}\n"
+            if nft.table_exists(LOCKDOWN_TABLE_NAME)
+            else ""
+        )
+        result = nft.load(replace + LOCKDOWN_RULESET)
         installed = result.returncode == 0
         detail = "deny posture installed" if installed else (result.stderr or "").strip()
     except NftError as exc:
         installed, detail = False, str(exc)
     checks.append(Check("deny posture installed", installed, detail))
 
-    try:
-        nft.delete_table(TABLE_NAME)
-        removed, removed_detail = True, f"{TABLE_NAME} removed"
-    except NftError as exc:
-        removed, removed_detail = False, str(exc)
-    checks.append(Check("policy table removed", removed, removed_detail))
+    # Containment before cleanup. The permissive policy table is removed only
+    # once the deny posture is actually in place: it denies by default, so
+    # discarding it after a failed deny install would leave the appliance with
+    # no input, output or forward filtering at all -- strictly worse than the
+    # policy that was there. Forwarding is already off either way, but
+    # forwarding control says nothing about traffic local processes originate,
+    # which the output hook and not the forward hook governs.
+    if not installed:
+        checks.append(
+            Check(
+                "policy table removed",
+                False,
+                f"{TABLE_NAME} retained: the deny posture is not installed, so removing "
+                "it would leave no filtering at all",
+            )
+        )
+    else:
+        try:
+            nft.delete_table(TABLE_NAME)
+            removed, removed_detail = True, f"{TABLE_NAME} removed"
+        except NftError as exc:
+            removed, removed_detail = False, str(exc)
+        checks.append(Check("policy table removed", removed, removed_detail))
 
     checks.extend(forwarding_checks(sysctl, expect_ipv4="0"))
     return checks
 
 
 def forwarding_checks(sysctl: Sysctl, expect_ipv4: str = "1") -> list[Check]:
-    """Read-only forwarding-state checks. Needs no configuration."""
+    """Read-only forwarding-state checks. Needs no configuration.
+
+    Unreadable state fails a check; it never raises. `lockdown` calls this on
+    its way out of a failure, and an exception here would replace the whole
+    containment report with a traceback at exactly the moment an operator needs
+    to know what the posture actually is. A knob that cannot be read is also not
+    a knob that can be called zero.
+    """
     checks: list[Check] = []
-    ipv4 = sysctl.read(IPV4_FORWARD)
-    checks.append(
-        Check("IPv4 forwarding", ipv4 == expect_ipv4, f"{ipv4} (expected {expect_ipv4})")
-    )
+    try:
+        ipv4 = sysctl.read(IPV4_FORWARD)
+    except SysctlError as exc:
+        checks.append(Check("IPv4 forwarding", False, str(exc)))
+    else:
+        checks.append(
+            Check("IPv4 forwarding", ipv4 == expect_ipv4, f"{ipv4} (expected {expect_ipv4})")
+        )
     for knob in (IPV6_FORWARD_ALL, IPV6_FORWARD_DEFAULT):
-        value = sysctl.read(knob)
+        try:
+            value = sysctl.read(knob)
+        except SysctlError as exc:
+            checks.append(Check(knob, False, str(exc)))
+            continue
         # Absent means IPv6 is compiled out, which satisfies the invariant.
         checks.append(Check(knob, value in {"0", None}, "absent" if value is None else value))
     return checks
@@ -196,7 +256,15 @@ class Authority:
         try:
             rendered = render_file(self.template, self.config, self._tor_uid())
         except (OSError, FirewallError) as exc:
-            raise AuthorityError(f"cannot render the firewall policy: {exc}") from exc
+            # Nothing has been touched, so the previously installed policy and
+            # the forwarding state are exactly as they were. Deliberate, per
+            # AGENTS.md: a parse failure must not flush a known-good ruleset.
+            # It also means the appliance is *not* contained -- that is
+            # systemd's job via OnFailure=, and the caller must not claim it.
+            raise AuthorityError(
+                f"cannot render the firewall policy: {exc}",
+                containment=CONTAINMENT_PRESERVED,
+            ) from exc
 
         try:
             self.require_topology()
@@ -237,7 +305,10 @@ class Authority:
                 message += " [lockdown incomplete: " + "; ".join(
                     f"{c.name}: {c.detail}" for c in unmet
                 ) + "]"
-            raise AuthorityError(message) from exc
+            raise AuthorityError(
+                message,
+                containment=CONTAINMENT_INCOMPLETE if unmet else CONTAINMENT_LOCKED_DOWN,
+            ) from exc
 
     def _install(self, rendered: str) -> None:
         """Replace only our own table, as a single nft transaction.
@@ -332,48 +403,113 @@ class Authority:
         checks.extend(self._ruleset_wide_checks())
         return checks
 
-    def _redirect_checks(self, listing: str) -> list[Check]:
+    def allowed_output_rules(self) -> dict[str, str]:
+        """Every non-Tor rule the output chain may carry: rule text -> purpose.
+
+        Exclusivity is the security claim, so the exceptions are enumerated
+        here rather than left implicit. Adding one is a deliberate act with a
+        reviewable diff; anything not listed is an unaccounted egress grant.
+        """
+        uplink = self.config.uplink_if
+        return {
+            'oifname "lo" accept': "loopback",
+            "ct state established,related accept": "established and related connections",
+            f'oifname "{uplink}" udp sport 68 udp dport 67 ip daddr 255.255.255.255 accept': (
+                "uplink DHCP, broadcast destination"
+            ),
+            f'oifname "{uplink}" udp sport 68 udp dport 67 ip daddr 0.0.0.0 accept': (
+                "uplink DHCP, unspecified destination"
+            ),
+        }
+
+    def tor_egress_rule(self, uid: int) -> str:
+        """The one rule that grants normal Internet egress, as a whole predicate."""
+        return f'oifname "{self.config.uplink_if}" meta skuid {uid} meta l4proto tcp accept'
+
+    def client_redirect_rules(self) -> dict[str, str]:
+        """Every rule the prerouting chain may carry: rule text -> check name."""
         client = self.config.client_if
+        return {
+            f'iifname "{client}" udp dport 53 redirect to :{self.config.dns_port}': (
+                f"client DNS -> Tor DNSPort {self.config.dns_port}"
+            ),
+            f'iifname "{client}" meta l4proto tcp redirect to :{self.config.trans_port}': (
+                f"client TCP -> Tor TransPort {self.config.trans_port}"
+            ),
+        }
+
+    def _redirect_checks(self, listing: str) -> list[Check]:
+        """Prove each redirect exists as one whole rule, and nothing else does.
+
+        The interface, the protocol and the destination port have to belong to
+        the *same* rule. Searching a whole chain for each term separately is
+        satisfied by a chain that redirects the wrong protocol next to a rule
+        naming the right port -- client traffic would then be handed somewhere
+        Tor is not listening, with every term still present.
+
+        The prerouting chain has policy accept, so an unlisted rule there is a
+        live rewrite of client traffic: a dnat elsewhere, or a redirect to a
+        port nothing anonymous is bound to.
+        """
         try:
-            body = chain_body(listing, "prerouting")
+            rules = chain_rules(chain_body(listing, "prerouting"))
         except NftError as exc:
             return [Check("client redirects", False, str(exc))]
-        expectations = (
-            (
-                f"client DNS -> Tor DNSPort {self.config.dns_port}",
-                f'iifname "{client}"' in body
-                and "udp dport 53" in body
-                and f"redirect to :{self.config.dns_port}" in body,
-            ),
-            (
-                f"client TCP -> Tor TransPort {self.config.trans_port}",
-                f'iifname "{client}"' in body
-                and f"redirect to :{self.config.trans_port}" in body,
-            ),
+
+        required = self.client_redirect_rules()
+        checks = [
+            Check(name, rule in rules, rule if rule in rules else f"no rule: {rule}")
+            for rule, name in required.items()
+        ]
+        unaccounted = [rule for rule in rules if rule not in required]
+        checks.append(
+            Check(
+                "no unaccounted prerouting rule",
+                not unaccounted,
+                "only the client redirects" if not unaccounted else "; ".join(unaccounted),
+            )
         )
-        return [Check(name, ok, "present" if ok else "missing") for name, ok in expectations]
+        return checks
 
     def _egress_checks(self, listing: str) -> list[Check]:
+        """Prove the Tor UID is the *only* normal egress principal.
+
+        Every rule in the output chain is accounted for against a named
+        exception. Finding `oifname "<uplink>"` and `skuid <tor>` somewhere in
+        the chain says nothing about exclusivity: an added
+        `oifname "<uplink>" meta l4proto tcp accept` satisfies both searches
+        while granting every local process unrestricted TCP egress.
+        """
         try:
-            body = strip_chain_declaration(chain_body(listing, "output"))
+            rules = chain_rules(chain_body(listing, "output"))
         except NftError as exc:
-            return [Check("Tor is the only uplink TCP principal", False, str(exc))]
+            return [Check("Tor UID holds the uplink TCP grant", False, str(exc))]
         try:
             uid = self._tor_uid()
         except FirewallError as exc:
             return [Check("Tor UID holds the uplink TCP grant", False, str(exc))]
-        bound_to_uplink = f'oifname "{self.config.uplink_if}"' in body
-        tor_rule = f"skuid {uid}" in body
+
+        tor_rule = self.tor_egress_rule(uid)
+        allowed = dict(self.allowed_output_rules())
+        allowed[tor_rule] = "Tor uplink TCP egress"
+
+        granted = tor_rule in rules
+        unaccounted = [rule for rule in rules if rule not in allowed]
         return [
             Check(
-                "output chain bound to the uplink interface",
-                bound_to_uplink,
-                self.config.uplink_if if bound_to_uplink else "no uplink-bound rule",
+                "Tor UID holds the uplink TCP grant",
+                granted,
+                tor_rule
+                if granted
+                else f"no complete rule granting uid {uid} TCP egress via "
+                f"{self.config.uplink_if}",
             ),
             Check(
-                "Tor UID holds the uplink TCP grant",
-                tor_rule,
-                f"skuid {uid}" if tor_rule else f"no rule for uid {uid}",
+                "no unaccounted egress grant",
+                not unaccounted,
+                "the output chain carries only the documented exceptions"
+                if not unaccounted
+                else "; ".join(unaccounted),
             ),
         ]
 
