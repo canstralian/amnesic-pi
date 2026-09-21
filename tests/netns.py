@@ -34,6 +34,10 @@ GATEWAY_UPLINK_ADDR = "10.88.0.1"
 UPLINK_ADDR = "10.88.0.2"
 CLIENT_SUBNET = "10.77.0.0/24"
 
+# The destination port host-originated probes aim at. Nothing listens on it;
+# the assertion is whether the SYN arrives at all, not whether it is answered.
+GATEWAY_PROBE_PORT = 4443
+
 
 def available() -> tuple[bool, str]:
     """Whether this host can run the namespace tests at all."""
@@ -149,11 +153,20 @@ class Topology:
         run(["ip", "netns", "exec", namespace, "ip", "link", "set", "lo", "up"])
 
     def _install_uplink_counter(self) -> None:
-        """Count every packet arriving at the uplink from the client subnet."""
+        """Count packets arriving at the uplink, by origin.
+
+        Two counters, because the appliance makes two different claims. Traffic
+        from the client subnet is forwarded traffic: any of it is a leak. Traffic
+        from the gateway's own uplink address is host-originated, and the claim
+        there is narrower -- Tor's UID may send it and nothing else may. Counting
+        them separately keeps a host-originated probe from being scored against
+        the forwarding invariant, or the reverse.
+        """
         ruleset = f"""table inet observer {{
     chain ingress {{
         type filter hook prerouting priority -300; policy accept;
         ip saddr {CLIENT_SUBNET} counter
+        ip saddr {GATEWAY_UPLINK_ADDR} tcp dport {GATEWAY_PROBE_PORT} counter
     }}
 }}
 """
@@ -185,6 +198,16 @@ class Topology:
     def set_forwarding(self, value: str) -> None:
         self.exec(self.gateway_ns, ["sysctl", "-qw", f"net.ipv4.ip_forward={value}"])
 
+    def uplink_packets_from_gateway(self) -> int:
+        """Packets the uplink saw that the GATEWAY ITSELF originated.
+
+        Host-originated traffic never carries a client-subnet source address, so
+        the forwarding counter cannot see it. This is what proves the output
+        chain's egress grant is bound to the Tor UID in the kernel, rather than
+        merely written down in a rule the verifier read back.
+        """
+        return self._counter_packets(f"ip saddr {GATEWAY_UPLINK_ADDR}")
+
     def uplink_packets_from_client(self) -> int:
         """Packets the uplink namespace saw from the client subnet.
 
@@ -198,12 +221,40 @@ class Topology:
         by construction. If you need a mid-test baseline, tear the observer
         table down and reinstall it rather than resetting it.
         """
+        return self._counter_packets(CLIENT_SUBNET)
+
+    def _counter_packets(self, marker: str) -> int:
         listing = self.exec(self.uplink_ns, ["nft", "list", "table", "inet", "observer"]).stdout
         for line in listing.splitlines():
-            if "counter" in line and CLIENT_SUBNET in line:
+            if "counter" in line and marker in line:
                 parts = line.split()
                 return int(parts[parts.index("packets") + 1])
-        raise RuntimeError(f"observer counter not found in:\n{listing}")
+        raise RuntimeError(f"observer counter for {marker!r} not found in:\n{listing}")
+
+    def gateway_sends_as(self, user: str, port: int = GATEWAY_PROBE_PORT) -> None:
+        """Originate a TCP connection FROM the gateway as `user`.
+
+        This is the non-forwarded egress path: a local process on the appliance
+        opening a clearnet socket. Only Tor's UID is authorized to do it.
+        """
+        script = (
+            "import socket\n"
+            "for _ in range(3):\n"
+            "    s = socket.socket()\n"
+            "    s.settimeout(0.4)\n"
+            "    try:\n"
+            f"        s.connect(({UPLINK_ADDR!r}, {port}))\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "    finally:\n"
+            "        s.close()\n"
+        )
+        self.exec(
+            self.gateway_ns,
+            ["setpriv", "--reuid", user, "--regid", "nogroup", "--clear-groups",
+             "python3", "-c", script],
+            check=False,
+        )
 
     def client_sends(self, port: int = 443, attempts: int = 3) -> None:
         """Have the client attempt a clearnet TCP connection to the uplink.

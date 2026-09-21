@@ -25,9 +25,27 @@ In normal mode, only the Tor daemon receives outbound Internet TCP authority. DH
 `network.env` must not be able to break both the firewall unit and the
 `OnFailure=` lockdown that exists to contain it.
 
+Containment also comes before cleanup. The permissive policy table is removed
+only once the deny posture is actually installed; if the deny posture fails to
+load, the existing policy is **retained** and the failure is reported. The
+alternative -- removing it anyway -- leaves no table at all, and the kernel's
+own defaults then accept. Forwarding is off on both paths, but forwarding
+governs the `forward` hook only: it says nothing about traffic local processes
+originate, which the `output` hook governs.
+
 ### P2a. Forwarding authority is transactional
 
-Forwarding does not exist until `amnesic-pi-firewall apply` has installed the nftables policy and verified it against the live kernel. No boot-time sysctl, and no other unit, can grant it. Every failure path within the transaction runs `lockdown`, which disables forwarding before it touches nftables.
+Forwarding does not exist until `amnesic-pi-firewall apply` has installed the nftables policy and verified it against the live kernel. No boot-time sysctl, and no other unit, can grant it. Every failure path within the transaction runs `lockdown`, which disables forwarding before it touches nftables. A configuration or template error is refused before the transaction begins, so nothing is torn down and nothing is contained; `apply` reports that state distinctly rather than claiming containment it did not perform.
+
+### P2a1. Egress authority is verified as exclusive, not as present
+
+`verify` accounts for every rule in the `output` chain against a named
+exception, and for every rule in `prerouting` against the two client redirects.
+Finding the Tor grant's terms somewhere in a chain does not establish that Tor
+is the only egress principal: a second, UID-less accept rule leaves every term
+in place while authorizing every local process. Each redirect must likewise
+match as one whole rule, so that the interface, the protocol and the Tor port
+belong to the same rule rather than merely to the same chain.
 
 ### P2b. Link-layer identity is randomized before the network exists
 

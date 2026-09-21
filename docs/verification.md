@@ -27,10 +27,15 @@ state against the intended posture:
 - `prerouting`, `input`, `forward`, `output` exist with the expected type, hook,
   priority and default policy;
 - the `forward` chain carries no accept verdict at all;
-- client DNS and client TCP redirect rules are present and name the configured
-  Tor ports;
-- the output chain is bound to the uplink interface and the Tor UID holds the
-  only ordinary uplink TCP grant;
+- the client DNS and client TCP redirect rules are each present as one complete
+  rule -- interface, protocol and Tor port in the same rule rather than merely
+  somewhere in the chain -- and the `prerouting` chain carries no other rule;
+- the Tor UID's uplink TCP grant is present as one complete rule, and every
+  other rule in the `output` chain matches a named exception (loopback,
+  established and related connections, and the two uplink DHCP rules). Anything
+  else is reported as an unaccounted egress grant and fails verification: the
+  claim is that Tor is the *only* ordinary egress principal, which cannot be
+  established by finding the Tor rule's terms somewhere in the chain;
 - no *other* table in the ruleset hooks `forward` with a non-drop policy or an
   accept verdict;
 - nothing in the ruleset source-NATs downstream traffic;
@@ -112,6 +117,10 @@ Failure points injected, each asserting zero packets at the uplink:
   defaults to ACCEPT);
 - lockdown after a successful apply;
 - repeated lockdown;
+- an unrestricted uplink TCP grant added to the policy -- refused by the live
+  verification inside `apply`, with forwarding left off;
+- host-originated egress from the gateway under a UID that is not Tor's, with
+  the authorized UID as the positive control;
 - forwarding already enabled before a failing transaction -- the preserved
   regression;
 - a configuration parse failure, driven through both steps: `apply` refuses and

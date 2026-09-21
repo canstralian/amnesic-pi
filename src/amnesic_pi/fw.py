@@ -6,10 +6,31 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from .authority import AuthorityError, lockdown, lockdown_succeeded
+from .authority import (
+    CONTAINMENT_INCOMPLETE,
+    CONTAINMENT_LOCKED_DOWN,
+    CONTAINMENT_PRESERVED,
+    AuthorityError,
+    lockdown,
+    lockdown_succeeded,
+)
 from .clihelp import add_common, authority_for, report, require_root
 from .nft import Nft
 from .sysctl import Sysctl
+
+# What to tell an operator about the appliance's state after a failed apply.
+# These are three different situations and only one of them is containment;
+# reporting "locked down" for all of them makes the word worthless at exactly
+# the moment it has to be trusted.
+CONTAINMENT_REPORT = {
+    CONTAINMENT_PRESERVED: (
+        "the previously installed policy and forwarding state are unchanged "
+        "and the appliance was NOT locked down"
+    ),
+    CONTAINMENT_LOCKED_DOWN: "appliance locked down",
+    CONTAINMENT_INCOMPLETE: "lockdown incomplete, posture unproven",
+}
+UNKNOWN_CONTAINMENT = "containment state unknown"
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
@@ -20,9 +41,19 @@ def cmd_apply(args: argparse.Namespace) -> int:
     try:
         authority.apply()
     except AuthorityError as exc:
-        print(f"firewall apply failed, appliance locked down: {exc}", file=sys.stderr)
+        outcome = CONTAINMENT_REPORT.get(
+            getattr(exc, "containment", None), UNKNOWN_CONTAINMENT
+        )
+        print(f"firewall apply failed, {outcome}: {exc}", file=sys.stderr)
         return 1
-    report(authority.verify())
+    # The transaction reported success. Exit zero only if the live posture
+    # still agrees -- a final report nobody acts on is not verification.
+    if not report(authority.verify()):
+        print(
+            "firewall apply completed but the live posture failed verification",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

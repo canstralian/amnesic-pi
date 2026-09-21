@@ -346,3 +346,69 @@ def test_client_udp_never_reaches_the_uplink(topology: netns.Topology, tmp_path:
         topology.client_sends_udp(port=port)
     leaked = topology.uplink_packets_from_client()
     assert leaked == 0, f"{leaked} downstream UDP packet(s) reached the uplink"
+
+
+# -- host-originated egress: the Tor UID is the only principal ------------
+
+
+def test_only_the_tor_uid_reaches_the_uplink_from_the_gateway(
+    topology: netns.Topology, tmp_path: Path
+):
+    """Packet evidence for the exclusivity claim, not a re-read of the rules.
+
+    The forwarding counter cannot see this traffic: it is originated by the
+    gateway itself, so it never carries a client-subnet source address. A
+    verifier that only reads rules back cannot distinguish a kernel that
+    enforces the UID grant from one that ignores it -- this can.
+
+    The positive control runs first. If the authorized UID's packets do not
+    arrive, the detector is blind and the negative result below means nothing.
+    """
+    env = write_env(tmp_path, topology, TOR_USER="nobody")
+    applied = firewall(topology, env, "apply")
+    assert applied.returncode == 0, applied.stderr
+    assert gateway_forwarding(topology) == "1"
+
+    # Positive control: the UID the policy grants egress to.
+    topology.gateway_sends_as("nobody")
+    authorized = topology.uplink_packets_from_gateway()
+    assert authorized > 0, (
+        "the authorized UID's packets never reached the uplink -- the detector "
+        "cannot see host-originated traffic, so a zero below proves nothing"
+    )
+
+    # The actual assertion: no other UID may use that path.
+    topology.gateway_sends_as("daemon")
+    assert topology.uplink_packets_from_gateway() == authorized, (
+        "a non-Tor UID on the gateway reached the uplink"
+    )
+
+
+def test_an_unrestricted_egress_grant_is_refused_against_a_real_kernel(
+    topology: netns.Topology, tmp_path: Path
+):
+    """The PR #9 review candidate, applied for real rather than to a fake.
+
+    A policy with a second, UID-less TCP grant must be rejected by the live
+    verification inside `apply`, leave forwarding off, and never reach a state
+    where an unauthorized local process can use the uplink.
+    """
+    broad = tmp_path / "broad.nft.in"
+    broad.write_text(
+        TEMPLATE.read_text(encoding="utf-8").replace(
+            'oifname "@UPLINK_IF@" meta skuid @TOR_UID@ meta l4proto tcp accept',
+            'oifname "@UPLINK_IF@" meta skuid @TOR_UID@ meta l4proto tcp accept\n'
+            '        oifname "@UPLINK_IF@" meta l4proto tcp accept',
+        ),
+        encoding="utf-8",
+    )
+    env = write_env(tmp_path, topology, TOR_USER="nobody")
+
+    applied = firewall(topology, env, "apply", template=broad)
+
+    assert applied.returncode != 0, "an unrestricted TCP grant was accepted"
+    assert "unaccounted egress grant" in (applied.stdout + applied.stderr)
+    assert gateway_forwarding(topology) == "0"
+    topology.gateway_sends_as("daemon")
+    assert topology.uplink_packets_from_gateway() == 0
+    assert_no_clearnet(topology, "after refusing an unrestricted egress grant")

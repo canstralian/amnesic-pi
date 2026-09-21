@@ -213,3 +213,34 @@ def nat_postrouting_masquerades(ruleset: str) -> list[str]:
         if re.search(r"(?<![\w-])(masquerade|snat)(?![\w-])", body):
             offenders.append(table)
     return offenders
+
+
+# A counter is a statement, not a predicate, and nft renders it with live
+# packet/byte totals. Dropping it keeps rule recognition independent of traffic.
+_COUNTER_RE = re.compile(r"(?<![\w-])counter(\s+packets\s+\d+\s+bytes\s+\d+)?(?![\w-])")
+
+# An nft-rendered `comment "..."` annotation, likewise not a predicate.
+_RULE_COMMENT_RE = re.compile(r'(?<![\w-])comment\s+"(?:[^"\\]|\\.)*"')
+
+
+def chain_rules(body: str) -> list[str]:
+    """Split a chain body into one normalized rule per entry.
+
+    `nft list` prints exactly one rule per line. Reading rules individually is
+    what makes exclusivity checkable: a substring search over a whole chain
+    cannot tell `oifname "eth0" meta skuid 42 meta l4proto tcp accept` from the
+    same terms spread over an unrestricted grant and a separate Tor rule.
+
+    Counters, comments and whitespace are normalized away so that none of them
+    changes whether a rule is recognised. Anything left that is not an
+    allowed rule is, by construction, an unaccounted grant.
+    """
+    rules: list[str] = []
+    for line in strip_chain_declaration(body).splitlines():
+        text = line.split("#", 1)[0]
+        text = _RULE_COMMENT_RE.sub(" ", text)
+        text = _COUNTER_RE.sub(" ", text)
+        text = " ".join(text.split())
+        if text and text not in {"{", "}"}:
+            rules.append(text)
+    return rules

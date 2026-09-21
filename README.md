@@ -230,9 +230,12 @@ sudo amnesic-pi-anon verify-tor-path
 sudo nft list table inet amnesic_pi
 ```
 
-`apply` fails closed: if anything in the transaction fails it runs `lockdown`
-itself, so a nonzero exit already means forwarding is off. To close the
-appliance down deliberately:
+`apply` fails closed: once the transaction has started touching the kernel, any
+failure runs `lockdown` itself. A configuration or template error is refused
+*before* anything is touched, which deliberately leaves the previous policy and
+forwarding state in place rather than flushing a known-good ruleset -- so on
+that one path a nonzero exit does **not** mean forwarding is off. The message
+says which happened. To close the appliance down deliberately:
 
 ```bash
 sudo amnesic-pi-firewall lockdown

@@ -316,9 +316,19 @@ This is a single transaction: it verifies topology, forces every forwarding
 knob to 0, installs the policy, verifies the installed policy against the live
 kernel, and only then grants IPv4 forwarding.
 
-A nonzero exit means the transaction failed **and** already ran `lockdown`, so
-forwarding is off and an unconditional deny posture is installed. There is no
-state in which the command fails and leaves forwarding enabled.
+A nonzero exit means the transaction did not complete. The message names which
+of three states the appliance is in, because they are not the same state and
+only one of them is containment:
+
+| Message contains | What is true |
+| --- | --- |
+| `appliance locked down` | The transaction had begun touching the kernel and failed. `lockdown` ran and every one of its checks passed: forwarding is off and an unconditional deny posture is installed. |
+| `lockdown incomplete, posture unproven` | The transaction failed **and** the containment did not fully complete. Treat the posture as unproven. Work from a local console. |
+| `NOT locked down` | The configuration or template could not be rendered, so nothing was touched at all. The previously installed policy and forwarding state are exactly as they were -- deliberately, so that a typo cannot flush a known-good ruleset. The appliance is **not** contained by this command; containment on that path is the `OnFailure=` lockdown unit's job. |
+
+A zero exit means the transaction completed **and** the final read-only
+verification of the live posture passed. If that verification fails, the command
+prints the failing checks and exits nonzero rather than reporting success.
 
 Inspect the live table:
 
@@ -411,8 +421,9 @@ PASS  chain output
 PASS  forward chain has no accept
 PASS  client DNS -> Tor DNSPort 5353
 PASS  client TCP -> Tor TransPort 9040
-PASS  output chain bound to the uplink interface
+PASS  no unaccounted prerouting rule
 PASS  Tor UID holds the uplink TCP grant
+PASS  no unaccounted egress grant
 PASS  no unauthorized forward hook
 PASS  no source NAT of downstream traffic
 PASS  IPv4 forwarding
