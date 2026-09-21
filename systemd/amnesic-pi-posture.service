@@ -1,0 +1,25 @@
+[Unit]
+Description=Amnesic Pi post-Tor egress posture verification
+Documentation=file:/usr/share/doc/amnesic-pi/verification.md
+
+# Phase 2. Tor must be running before this can say anything about the Tor path.
+Requires=tor@default.service
+After=tor@default.service
+
+# Still bound to the firewall: a posture verified against a policy that has
+# since gone away is not a verified posture.
+BindsTo=amnesic-pi-firewall.service
+After=amnesic-pi-firewall.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/amnesic-pi/network.env
+
+# Hard gates (firewall posture, Tor listeners, a completed SOCKS circuit, Tor
+# DNS) decide the exit code. Third-party echo telemetry is reported but does
+# not: an echo-service outage is not proof of a clearnet leak.
+ExecStart=/usr/local/bin/amnesic-pi-anon verify-tor-path
+
+[Install]
+WantedBy=multi-user.target

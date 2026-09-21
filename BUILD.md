@@ -254,13 +254,81 @@ Do not continue if validation fails.
 
 ---
 
-## 10. Apply the fail-closed policy
+## 10. Randomize the link-layer identity
+
+This step runs before the firewall, and before anything may configure an
+interface. It is also the step that exposes a USB-Ethernet adapter whose driver
+ignores runtime MAC changes.
+
+```bash
+sudo amnesic-pi-anon randomize-mac
+```
+
+Expected, one line per interface:
+
+```text
+PASS  eth0  assigned 02:... (burned-in: b8:27:eb:...)
+PASS  eth1  assigned 06:... (burned-in: 00:e0:4c:...)
+```
+
+A nonzero exit means the kernel did not report the address the command
+generated. Do not work around it. Either the adapter is unsuitable, or it needs
+longer to enumerate -- raise `IFACE_WAIT_SECONDS` in
+`/etc/amnesic-pi/network.env` and retry. Record which adapter you used and
+whether it passed.
+
+If NetworkManager is holding the downstream profile from an earlier section, it
+may reassert its own configuration on the interface. Take the profile down
+first, then randomize, then bring it back up:
+
+```bash
+sudo nmcli connection down amnesic-client
+sudo amnesic-pi-anon randomize-mac
+sudo nmcli connection up amnesic-client
+```
+
+`verify-zero-ip` asserts the **pre-network** posture: no address configured
+before the network manager runs. During this manual walkthrough the downstream
+profile is already up, so run the check with it down:
+
+```bash
+sudo nmcli connection down amnesic-client
+sudo amnesic-pi-anon verify-zero-ip
+sudo nmcli connection up amnesic-client
+```
+
+At boot this ordering is enforced rather than arranged by hand:
+`amnesic-pi-anon.service` runs before `network-pre.target`, and NetworkManager
+is `BindsTo=amnesic-pi-firewall.service`, so neither can configure an address
+ahead of the gate.
+
+---
+
+## 11. Apply the fail-closed policy
 
 From the local console:
 
 ```bash
-sudo amnesic-pi apply-firewall
+sudo amnesic-pi-firewall apply
 ```
+
+This is a single transaction: it verifies topology, forces every forwarding
+knob to 0, installs the policy, verifies the installed policy against the live
+kernel, and only then grants IPv4 forwarding.
+
+A nonzero exit **from the transaction** means it failed and already ran
+`lockdown`, so forwarding is off and an unconditional deny posture is
+installed.
+
+Two failures exit nonzero *before* the transaction starts and deliberately
+change nothing: a non-root invocation, and a malformed
+`/etc/amnesic-pi/network.env`, which exits `configuration error: ...`. Neither
+runs `lockdown`, because a parse failure must not flush a known-good ruleset.
+Forwarding is left exactly as it was -- after an earlier successful `apply`,
+that means still enabled. As a systemd unit the firewall's `OnFailure=` runs
+`amnesic-pi-lockdown.service` and closes that window. Run by hand there is no
+such handler: correct the config and re-run `apply`, or close the appliance
+down yourself with `sudo amnesic-pi-firewall lockdown`.
 
 Inspect the live table:
 
@@ -268,17 +336,17 @@ Inspect the live table:
 sudo nft list table inet amnesic_pi
 ```
 
-The loader validates the candidate transaction before replacing the existing Amnesic Pi table. A malformed candidate should leave the known-good table untouched.
+The loader validates the candidate transaction before replacing the existing
+Amnesic Pi table. A malformed candidate leaves the known-good table untouched.
 
 ---
 
-## 11. Apply kernel network policy
+## 12. Confirm the kernel forwarding state
 
-Only after the firewall exists:
-
-```bash
-sudo sysctl --system
-```
+There is deliberately **no** `sysctl --system` step here. `/etc/sysctl.d/99-amnesic-pi.conf`
+pins forwarding to 0 and never grants it; the firewall transaction is the only
+thing that turns it on. Running `sysctl --system` after a successful apply would
+switch forwarding back off and break the appliance until the next apply.
 
 Verify forwarding:
 
@@ -286,10 +354,16 @@ Verify forwarding:
 sysctl net.ipv4.ip_forward
 ```
 
-Expected:
+Expected **after a successful apply**:
 
 ```text
 net.ipv4.ip_forward = 1
+```
+
+Expected at any other time, including after a failed apply or a lockdown:
+
+```text
+net.ipv4.ip_forward = 0
 ```
 
 Verify Stage 1 IPv6 disablement:
@@ -305,7 +379,7 @@ The intended sequencing is firewall first, IP forwarding second.
 
 ---
 
-## 12. Start Tor
+## 13. Start Tor
 
 ```bash
 sudo systemctl restart tor@default.service
@@ -330,46 +404,91 @@ Expected roles:
 
 ---
 
-## 13. Run the internal verifier
+## 14. Run the read-only posture verifier
 
 ```bash
-sudo amnesic-pi verify
+sudo amnesic-pi-firewall verify
 ```
 
-The verifier should establish at least:
+This command never mutates the system. It should establish at least:
 
 ```text
-PASS nft table
-PASS input policy DROP
-PASS forward policy DROP
-PASS output policy DROP
-PASS IPv4 forwarding
-PASS IPv6 disabled
-PASS Tor TransPort
-PASS Tor DNSPort
+PASS  nft table
+PASS  chain prerouting
+PASS  chain input
+PASS  chain forward
+PASS  chain output
+PASS  forward chain has no accept
+PASS  client DNS -> Tor DNSPort 5353
+PASS  client TCP -> Tor TransPort 9040
+PASS  output chain bound to the uplink interface
+PASS  Tor UID holds the uplink TCP grant
+PASS  no unauthorized forward hook
+PASS  no source NAT of downstream traffic
+PASS  IPv4 forwarding
 ```
 
-A verifier failure is a deployment failure. Do not fix failures by simply removing the checks.
+A verifier failure is a deployment failure. Do not fix failures by removing the
+checks.
 
 ---
 
-## 14. Enable the boot sequence
+## 15. Verify the Tor path
+
+This runs **after** Tor, never before the firewall. Tor was started in the
+previous section:
+
+```bash
+sudo amnesic-pi-anon verify-tor-path
+```
+
+Hard gates (`FAIL` blocks readiness): the firewall posture, the Tor listeners, a
+completed SOCKS circuit, and Tor DNS resolution.
+
+Observational telemetry prints as `WARN` and does not block. An unreachable echo
+service is an outage, not proof of a clearnet leak. For a release run on
+hardware you may promote it:
+
+```bash
+sudo amnesic-pi-anon verify-tor-path --require-observation
+```
+
+---
+
+## 16. Enable the boot sequence
 
 Only after manual validation succeeds:
 
 ```bash
+sudo systemctl enable amnesic-pi-anon.service
 sudo systemctl enable amnesic-pi-firewall.service
 sudo systemctl enable tor@default.service
-sudo systemctl enable amnesic-pi-verify.service
+sudo systemctl enable amnesic-pi-posture.service
+sudo systemctl enable amnesic-pi-ready.target
 ```
 
 Check:
 
 ```bash
-systemctl is-enabled amnesic-pi-firewall.service
-systemctl is-enabled tor@default.service
-systemctl is-enabled amnesic-pi-verify.service
+systemctl is-enabled \
+  amnesic-pi-anon.service \
+  amnesic-pi-firewall.service \
+  tor@default.service \
+  amnesic-pi-posture.service \
+  amnesic-pi-ready.target
 ```
+
+Confirm the authority relationships resolved as intended:
+
+```bash
+systemctl show -p BoundBy amnesic-pi-firewall.service
+systemctl show -p BindsTo -p After systemd-networkd.service
+systemctl show -p BindsTo -p After tor@default.service
+```
+
+`BoundBy` should name `systemd-networkd.service`, `tor@default.service` and
+`amnesic-pi-posture.service`. If it does not, the drop-ins did not land -- stop
+and fix that before rebooting.
 
 Reboot:
 
@@ -380,18 +499,24 @@ sudo reboot
 After reboot:
 
 ```bash
-sudo amnesic-pi verify
+sudo amnesic-pi-firewall verify
+sudo amnesic-pi-anon verify-tor-path
 sudo nft list table inet amnesic_pi
+systemctl is-active amnesic-pi-ready.target
 sudo systemctl status \
+  amnesic-pi-anon.service \
   amnesic-pi-firewall.service \
   tor@default.service \
-  amnesic-pi-verify.service \
+  amnesic-pi-posture.service \
   --no-pager
 ```
 
+`amnesic-pi-ready.target` being active is the readiness signal. Any earlier
+stage failing means it is not reached.
+
 ---
 
-## 15. Configure the downstream client
+## 17. Configure the downstream client
 
 Connect the test machine directly to `eth1` and configure it manually:
 
@@ -406,7 +531,7 @@ Do not configure a second gateway on that interface.
 
 ---
 
-## 16. Test Tor connectivity
+## 18. Test Tor connectivity
 
 From the downstream client:
 
@@ -420,7 +545,7 @@ Use a separate non-Tor device/network when comparing public addresses. The Pi it
 
 ---
 
-## 17. Prove Tor failure is closed
+## 19. Prove Tor failure is closed
 
 First run the repository integration scaffold:
 
@@ -456,7 +581,7 @@ The downstream TCP request should work again after Tor bootstraps.
 
 ---
 
-## 18. Test DNS leakage
+## 20. Test DNS leakage
 
 Install `tcpdump` before enabling OverlayFS:
 
@@ -476,7 +601,7 @@ Direct downstream DNS must not emerge from the uplink as ordinary port 53/853 tr
 
 ---
 
-## 19. Test UDP and QUIC leakage
+## 21. Test UDP and QUIC leakage
 
 Watch non-DHCP UDP on the uplink:
 
@@ -490,7 +615,7 @@ Generic downstream UDP must not be forwarded. Applications that support it may f
 
 ---
 
-## 20. Test IPv6
+## 22. Test IPv6
 
 On the Pi:
 
@@ -505,7 +630,7 @@ IPv6 must not provide an alternative path around the IPv4 Tor policy.
 
 ---
 
-## 21. Enable the amnesic root filesystem
+## 23. Enable the amnesic root filesystem
 
 Do this only after the OS is updated and all preceding network tests pass.
 
@@ -530,7 +655,7 @@ Raspberry Pi's OverlayFS mechanism keeps the underlying root filesystem read-onl
 
 ---
 
-## 22. Prove amnesia
+## 24. Prove amnesia
 
 From the repository:
 
@@ -550,7 +675,7 @@ The probe must be absent.
 
 ---
 
-## 23. Maintenance/update transition
+## 25. Maintenance/update transition
 
 Once OverlayFS is active, ordinary package and configuration changes will not survive reboot. Treat updates as an explicit state transition:
 
@@ -586,12 +711,38 @@ Kernel, Tor, nftables, NetworkManager/systemd, and OverlayFS updates are securit
 
 ---
 
-## 24. Developer validation
+## 26. Developer validation
 
 Run unit tests:
 
 ```bash
 python3 -m pytest -q
+```
+
+Run the resolved systemd graph tests and `systemd-analyze verify`:
+
+```bash
+python3 -m pytest -q tests/test_systemd.py
+```
+
+Run the packet-level fail-closed suite. This needs root, `iproute2` and
+`nftables`, and is the strongest automated evidence the repository produces:
+
+```bash
+sudo python3 -m pytest -q -m netns
+```
+
+It skips rather than fails when namespaces are unavailable, so confirm it
+actually ran:
+
+```bash
+sudo python3 -m pytest -m netns --collect-only -q | tail -1
+```
+
+Lint:
+
+```bash
+ruff check src tests
 ```
 
 Compile Python:
@@ -608,11 +759,12 @@ bash -n tests/integration/fail_closed.sh
 bash -n scripts/check-amnesia.sh
 ```
 
-On Raspberry Pi OS with nftables installed, also run the rendered-policy syntax check and root integration test.
+On Raspberry Pi OS with nftables installed, also run the rendered-policy syntax
+check and the root integration test.
 
 ---
 
-## 25. Release gate
+## 27. Release gate
 
 Do **not** describe a release as fail-closed until the exact release candidate passes all of these on target hardware:
 
@@ -631,7 +783,11 @@ Do **not** describe a release as fail-closed until the exact release candidate p
 [ ] no generic downstream UDP/QUIC escape
 [ ] no IPv6 escape path
 [ ] boot ordering restores the firewall before network authority
-[ ] amnesic-pi verify passes
+[ ] network manager and Tor show BindsTo=amnesic-pi-firewall.service
+[ ] MAC randomization passes on every adapter in use
+[ ] amnesic-pi-firewall verify passes
+[ ] amnesic-pi-anon verify-tor-path passes
+[ ] amnesic-pi-ready.target is reached
 [ ] OverlayFS is enabled
 [ ] reboot-amnesia probe disappears
 [ ] threat model reviewed against the release diff

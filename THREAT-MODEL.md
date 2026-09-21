@@ -19,6 +19,22 @@ If Tor is unavailable, misconfigured, stopped, or not yet ready, client traffic 
 
 In normal mode, only the Tor daemon receives outbound Internet TCP authority. DHCP required to acquire the uplink address is separately and narrowly permitted.
 
+### P2a0. Containment does not share a failure mode with what it contains
+
+`amnesic-pi-firewall lockdown` reads no configuration. A malformed
+`network.env` must not be able to break both the firewall unit and the
+`OnFailure=` lockdown that exists to contain it.
+
+### P2a. Forwarding authority is transactional
+
+Forwarding does not exist until `amnesic-pi-firewall apply` has installed the nftables policy and verified it against the live kernel. No boot-time sysctl, and no other unit, can grant it. Every failure path within the transaction runs `lockdown`, which disables forwarding before it touches nftables.
+
+### P2b. Link-layer identity is randomized before the network exists
+
+Each role interface receives a locally administered, unicast MAC derived from `os.urandom` before the network manager is allowed to start. The change is verified by reading the address back from the kernel and asserting it is neither the burned-in address nor the pre-change address.
+
+This addresses passive observation of the appliance's link-layer identity on the uplink segment. It does not address an adversary who can correlate the appliance by timing, traffic shape, or any identifier above layer 2.
+
 ### P3. Ephemeral runtime
 
 When Raspberry Pi OS OverlayFS is enabled, ordinary writes to the root filesystem should land in RAM and disappear at reboot.
@@ -34,6 +50,9 @@ Persistent data must live outside the ephemeral root and require an explicit des
 - DNS leakage from downstream clients
 - Tor process failure
 - service-ordering mistakes during boot
+- a unit failing while the units depending on it start anyway
+- a NIC or USB-Ethernet driver silently ignoring a MAC change
+- a partially applied firewall policy
 - an unexpected client interface trying ordinary forwarding
 - accidental IPv6 leakage
 - reboot after ordinary runtime writes
@@ -51,6 +70,8 @@ Persistent data must live outside the ephemeral root and require an explicit des
 - RF side channels
 - compromise of a downstream client
 - forensic recovery from RAM while powered
+- out-of-band mutation of the nftables ruleset by root (see below)
+- correlation of the appliance above layer 2 despite MAC randomization
 
 ## Trust boundaries
 
@@ -77,11 +98,60 @@ The Linux kernel, nftables, Tor package, Raspberry Pi firmware, and base OS pack
 
 "Fail closed" in this project means **network authority is absent by default**. It does not mean the appliance is immune to arbitrary root modification. A root attacker can change firewall rules and is outside Stage 1's threat model.
 
+## Known limitation: out-of-band nftables mutation
+
+`BindsTo=` observes **systemd unit state**, not nftables **kernel state**.
+
+If somebody runs:
+
+```bash
+nft flush ruleset
+```
+
+while `amnesic-pi-firewall.service` is still `active (exited)`, systemd sees no
+change. The unit is active, so the units bound to it keep running, and the
+policy that constrained them is gone.
+
+Stage 1 therefore does **not** claim:
+
+```text
+policy loss => connectivity loss
+```
+
+What Stage 1 does claim is narrower and accurate:
+
+```text
+firewall unit becomes inactive => network manager and Tor become inactive
+```
+
+Detecting out-of-band ruleset mutation needs an integrity watcher -- an
+nftables netlink monitor, or a periodic `amnesic-pi-firewall verify` that
+triggers lockdown on mismatch. Neither is in Stage 1. A watchdog is a real
+authority component with its own failure modes, and adding one casually would
+create a new way for the appliance to lock itself out. It is tracked as
+separate future work.
+
+Two things reduce the practical exposure without closing the gap:
+
+- `amnesic-pi-firewall verify` is read-only and can be run on demand or from a
+  timer by an operator who wants periodic confirmation;
+- flushing the ruleset requires root, which is already outside the threat model.
+
+This limitation is stated here rather than papered over, because the difference
+between "the unit is active" and "the policy is installed" is exactly the kind
+of gap a fail-closed claim must not hide.
+
 ## Security update rule
 
 Kernel, Tor, nftables, NetworkManager/systemd, and Raspberry Pi OverlayFS changes can invalidate assumptions. Every such upgrade should be followed by:
 
 1. static policy tests;
-2. runtime `amnesic-pi verify`;
-3. a Tor-stop fail-closed test; and
-4. an amnesia/reboot persistence test.
+2. the resolved systemd graph tests and `systemd-analyze verify`;
+3. the namespace fail-closed suite (`pytest -m netns`);
+4. runtime `amnesic-pi-firewall verify`;
+5. runtime `amnesic-pi-anon verify-tor-path`;
+6. a Tor-stop fail-closed test; and
+7. an amnesia/reboot persistence test.
+
+A systemd upgrade specifically can change how `BindsTo=` and `OnFailure=`
+resolve, so step 2 is not optional after one.

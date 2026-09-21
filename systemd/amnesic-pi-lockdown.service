@@ -1,0 +1,16 @@
+[Unit]
+Description=Amnesic Pi emergency lockdown (forwarding off, deny everything)
+Documentation=file:/usr/share/doc/amnesic-pi/boot-chain.md
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+EnvironmentFile=-/etc/amnesic-pi/network.env
+
+# Idempotent and safe after a partial apply. Disables IPv4 then IPv6
+# forwarding before touching nftables, so a cleanup that itself fails still
+# leaves the appliance unable to forward.
+ExecStart=/usr/local/bin/amnesic-pi-firewall lockdown
