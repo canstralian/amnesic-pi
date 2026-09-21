@@ -117,7 +117,8 @@ Primary target:
 - USB-to-Ethernet adapter for downstream traffic
 - local keyboard/display during initial firewall deployment
 
-Pi 3 and Pi 4 should also be viable with current Raspberry Pi OS ARM64.
+Pi 3 and Pi 4 run the same ARM64 Raspberry Pi OS, but no hardware target --
+primary or otherwise -- has been validated against this authority model.
 
 > **No Raspberry Pi hardware testing has been performed on the current authority model.** The automated evidence covers unit behaviour, kernel/namespace packet authority, and the resolved systemd graph. Hardware behaviour -- including whether a given USB-Ethernet adapter accepts runtime MAC changes, device enumeration timing, interface naming stability, and the real boot sequence -- is **[UNVERIFIED]**. See [docs/verification.md](docs/verification.md#unverified-on-hardware).
 
@@ -230,12 +231,16 @@ sudo amnesic-pi-anon verify-tor-path
 sudo nft list table inet amnesic_pi
 ```
 
-`apply` fails closed: once the transaction has started touching the kernel, any
-failure runs `lockdown` itself. A configuration or template error is refused
-*before* anything is touched, which deliberately leaves the previous policy and
-forwarding state in place rather than flushing a known-good ruleset -- so on
-that one path a nonzero exit does **not** mean forwarding is off. The message
-says which happened. To close the appliance down deliberately:
+`apply` fails closed *once the transaction starts*: if anything in it fails,
+`apply` runs `lockdown` itself, and the message says whether that containment
+completed (`appliance locked down`) or did not (`lockdown incomplete, posture
+unproven`). Three failures exit *before* the transaction and deliberately change
+nothing -- a non-root invocation, a malformed config (`configuration error:
+...`), and a template that cannot be rendered (`... NOT locked down`) -- because
+a parse failure must not flush a known-good ruleset. Forwarding is then left as
+it was, which after an earlier successful `apply` means still on. Under systemd
+the unit's `OnFailure=` closes that window; a run by hand has no such handler,
+so fix the fault and re-run `apply`, or close the appliance down yourself:
 
 ```bash
 sudo amnesic-pi-firewall lockdown

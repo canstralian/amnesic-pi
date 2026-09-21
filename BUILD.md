@@ -316,15 +316,26 @@ This is a single transaction: it verifies topology, forces every forwarding
 knob to 0, installs the policy, verifies the installed policy against the live
 kernel, and only then grants IPv4 forwarding.
 
-A nonzero exit means the transaction did not complete. The message names which
-of three states the appliance is in, because they are not the same state and
-only one of them is containment:
+Three failures exit nonzero *before* the transaction starts and deliberately
+change nothing: a non-root invocation, a malformed
+`/etc/amnesic-pi/network.env` (which exits `configuration error: ...`), and a
+policy template that cannot be rendered (which exits `... the appliance was NOT
+locked down`). None of them runs `lockdown`, because a parse failure must not
+flush a known-good ruleset. Forwarding is left exactly as it was -- after an
+earlier successful `apply`, that means still enabled. As a systemd unit the
+firewall's `OnFailure=` runs `amnesic-pi-lockdown.service` and closes that
+window. Run by hand there is no such handler: correct the fault and re-run
+`apply`, or close the appliance down yourself with
+`sudo amnesic-pi-firewall lockdown`.
+
+Once the transaction has begun touching the kernel, a nonzero exit means it
+failed **and** already ran `lockdown`. The message says how far that containment
+got, because these are not the same state:
 
 | Message contains | What is true |
 | --- | --- |
-| `appliance locked down` | The transaction had begun touching the kernel and failed. `lockdown` ran and every one of its checks passed: forwarding is off and an unconditional deny posture is installed. |
+| `appliance locked down` | `lockdown` ran and every one of its checks passed: forwarding is off and an unconditional deny posture is installed. |
 | `lockdown incomplete, posture unproven` | The transaction failed **and** the containment did not fully complete. Treat the posture as unproven. Work from a local console. |
-| `NOT locked down` | The configuration or template could not be rendered, so nothing was touched at all. The previously installed policy and forwarding state are exactly as they were -- deliberately, so that a typo cannot flush a known-good ruleset. The appliance is **not** contained by this command; containment on that path is the `OnFailure=` lockdown unit's job. |
 
 A zero exit means the transaction completed **and** the final read-only
 verification of the live posture passed. If that verification fails, the command

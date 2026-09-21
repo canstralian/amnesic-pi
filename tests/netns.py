@@ -88,36 +88,46 @@ class Topology:
     # -- lifecycle ---------------------------------------------------------
 
     def build(self) -> Topology:
-        for namespace in (self.client_ns, self.gateway_ns, self.uplink_ns):
-            run(["ip", "netns", "add", namespace])
+        # A failure part-way through leaves namespaces and veth pairs on the
+        # host: __exit__ does not run when __enter__ raises, and a fixture that
+        # binds the result never binds it. destroy() tolerates namespaces that
+        # were never created, so it is safe on a partial topology.
+        try:
+            for namespace in (self.client_ns, self.gateway_ns, self.uplink_ns):
+                run(["ip", "netns", "add", namespace])
 
-        # client <-> gateway
-        run(["ip", "link", "add", f"{self.tag}cli", "type", "veth", "peer", "name", self.client_if])
-        run(["ip", "link", "set", f"{self.tag}cli", "netns", self.client_ns])
-        run(["ip", "link", "set", self.client_if, "netns", self.gateway_ns])
+            # client <-> gateway
+            run(["ip", "link", "add", f"{self.tag}cli", "type", "veth",
+                 "peer", "name", self.client_if])
+            run(["ip", "link", "set", f"{self.tag}cli", "netns", self.client_ns])
+            run(["ip", "link", "set", self.client_if, "netns", self.gateway_ns])
 
-        # gateway <-> uplink
-        run(["ip", "link", "add", f"{self.tag}upl", "type", "veth", "peer", "name", self.uplink_if])
-        run(["ip", "link", "set", f"{self.tag}upl", "netns", self.uplink_ns])
-        run(["ip", "link", "set", self.uplink_if, "netns", self.gateway_ns])
+            # gateway <-> uplink
+            run(["ip", "link", "add", f"{self.tag}upl", "type", "veth",
+                 "peer", "name", self.uplink_if])
+            run(["ip", "link", "set", f"{self.tag}upl", "netns", self.uplink_ns])
+            run(["ip", "link", "set", self.uplink_if, "netns", self.gateway_ns])
 
-        self._configure(self.client_ns, f"{self.tag}cli", f"{CLIENT_ADDR}/24")
-        self._configure(self.gateway_ns, self.client_if, f"{GATEWAY_CLIENT_ADDR}/24")
-        self._configure(self.gateway_ns, self.uplink_if, f"{GATEWAY_UPLINK_ADDR}/24")
-        self._configure(self.uplink_ns, f"{self.tag}upl", f"{UPLINK_ADDR}/24")
+            self._configure(self.client_ns, f"{self.tag}cli", f"{CLIENT_ADDR}/24")
+            self._configure(self.gateway_ns, self.client_if, f"{GATEWAY_CLIENT_ADDR}/24")
+            self._configure(self.gateway_ns, self.uplink_if, f"{GATEWAY_UPLINK_ADDR}/24")
+            self._configure(self.uplink_ns, f"{self.tag}upl", f"{UPLINK_ADDR}/24")
 
-        # The client routes everything through the gateway. This is the whole
-        # point: the client *tries* to reach the uplink, and the appliance's
-        # policy decides whether that succeeds.
-        run(["ip", "netns", "exec", self.client_ns, "ip", "route", "add", "default",
-             "via", GATEWAY_CLIENT_ADDR])
-        # The uplink knows how to answer, so a successful leak is observable
-        # rather than merely dropped on the way back.
-        run(["ip", "netns", "exec", self.uplink_ns, "ip", "route", "add", CLIENT_SUBNET,
-             "via", GATEWAY_UPLINK_ADDR])
+            # The client routes everything through the gateway. This is the whole
+            # point: the client *tries* to reach the uplink, and the appliance's
+            # policy decides whether that succeeds.
+            run(["ip", "netns", "exec", self.client_ns, "ip", "route", "add", "default",
+                 "via", GATEWAY_CLIENT_ADDR])
+            # The uplink knows how to answer, so a successful leak is observable
+            # rather than merely dropped on the way back.
+            run(["ip", "netns", "exec", self.uplink_ns, "ip", "route", "add", CLIENT_SUBNET,
+                 "via", GATEWAY_UPLINK_ADDR])
 
-        self._install_uplink_counter()
-        self.apply_sysctl_baseline()
+            self._install_uplink_counter()
+            self.apply_sysctl_baseline()
+        except BaseException:
+            self.destroy()
+            raise
         return self
 
     def apply_sysctl_baseline(self) -> dict[str, str]:
