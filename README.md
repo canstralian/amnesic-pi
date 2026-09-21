@@ -117,7 +117,8 @@ Primary target:
 - USB-to-Ethernet adapter for downstream traffic
 - local keyboard/display during initial firewall deployment
 
-Pi 3 and Pi 4 should also be viable with current Raspberry Pi OS ARM64.
+Pi 3 and Pi 4 run the same ARM64 Raspberry Pi OS, but no hardware target --
+primary or otherwise -- has been validated against this authority model.
 
 > **No Raspberry Pi hardware testing has been performed on the current authority model.** The automated evidence covers unit behaviour, kernel/namespace packet authority, and the resolved systemd graph. Hardware behaviour -- including whether a given USB-Ethernet adapter accepts runtime MAC changes, device enumeration timing, interface naming stability, and the real boot sequence -- is **[UNVERIFIED]**. See [docs/verification.md](docs/verification.md#unverified-on-hardware).
 
@@ -230,9 +231,15 @@ sudo amnesic-pi-anon verify-tor-path
 sudo nft list table inet amnesic_pi
 ```
 
-`apply` fails closed: if anything in the transaction fails it runs `lockdown`
-itself, so a nonzero exit already means forwarding is off. To close the
-appliance down deliberately:
+`apply` fails closed *once the transaction starts*: if anything in it fails,
+`apply` runs `lockdown` itself, so that nonzero exit already means forwarding
+is off. Two failures exit before the transaction and deliberately change
+nothing -- a non-root invocation, and a malformed config, which exits
+`configuration error: ...` because a parse failure must not flush a known-good
+ruleset. Forwarding is then left as it was, which after an earlier successful
+`apply` means still on. Under systemd the unit's `OnFailure=` closes that
+window; a run by hand has no such handler, so fix the config and re-run
+`apply`, or close the appliance down yourself:
 
 ```bash
 sudo amnesic-pi-firewall lockdown

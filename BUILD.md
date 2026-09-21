@@ -316,9 +316,19 @@ This is a single transaction: it verifies topology, forces every forwarding
 knob to 0, installs the policy, verifies the installed policy against the live
 kernel, and only then grants IPv4 forwarding.
 
-A nonzero exit means the transaction failed **and** already ran `lockdown`, so
-forwarding is off and an unconditional deny posture is installed. There is no
-state in which the command fails and leaves forwarding enabled.
+A nonzero exit **from the transaction** means it failed and already ran
+`lockdown`, so forwarding is off and an unconditional deny posture is
+installed.
+
+Two failures exit nonzero *before* the transaction starts and deliberately
+change nothing: a non-root invocation, and a malformed
+`/etc/amnesic-pi/network.env`, which exits `configuration error: ...`. Neither
+runs `lockdown`, because a parse failure must not flush a known-good ruleset.
+Forwarding is left exactly as it was -- after an earlier successful `apply`,
+that means still enabled. As a systemd unit the firewall's `OnFailure=` runs
+`amnesic-pi-lockdown.service` and closes that window. Run by hand there is no
+such handler: correct the config and re-run `apply`, or close the appliance
+down yourself with `sudo amnesic-pi-firewall lockdown`.
 
 Inspect the live table:
 
