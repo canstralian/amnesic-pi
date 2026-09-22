@@ -1,6 +1,8 @@
 import json
 import subprocess
 
+import pytest
+
 import amnesic_pi.verify as verifier
 from amnesic_pi.config import Config
 
@@ -81,6 +83,24 @@ def test_absent_policy_is_treated_as_default_accept():
 def test_metainfo_is_ignored():
     policies = verifier._chain_policies(_nft_json(metainfo=True))
     assert policies["input"] == "drop"
+
+
+@pytest.mark.parametrize("payload", [[], None, "invalid", 0, True])
+def test_firewall_verifier_reports_non_object_json_as_failure(monkeypatch, payload):
+    monkeypatch.setattr(
+        verifier,
+        "_run",
+        lambda *args: subprocess.CompletedProcess(
+            args, 0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+
+    checks = {check.name: check for check in verifier.verify_firewall()}
+
+    assert not checks["nft table"].ok
+    assert checks["nft table"].detail == "nft JSON root must be an object"
+    for name in ("input", "forward", "output"):
+        assert not checks[f"{name} policy DROP"].ok
 
 
 def test_firewall_verifier_rejects_any_forward_rule(monkeypatch):

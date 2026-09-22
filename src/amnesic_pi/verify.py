@@ -45,6 +45,8 @@ def _port_open(port: int) -> bool:
 
 def _nft_state(text: str) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("nft JSON root must be an object")
     entries = payload.get("nftables")
     if not isinstance(entries, list):
         raise ValueError("nft JSON is missing the nftables list")

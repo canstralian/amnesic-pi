@@ -352,11 +352,16 @@ PASS nft table
 PASS input policy DROP
 PASS forward policy DROP
 PASS output policy DROP
-PASS IPv4 forwarding disabled
+PASS forward chain has no rules
+PASS IPv4 forwarding
 PASS IPv6 disabled
+PASS IPv6 forwarding disabled
 PASS Tor TransPort
 PASS Tor DNSPort
 ```
+
+`IPv4 forwarding` passes when `net.ipv4.ip_forward=1`. The empty forward chain
+with policy `DROP` enforces clearnet denial; IPv6 forwarding must remain `0`.
 
 A verifier failure is a deployment failure. Do not fix failures by simply removing the checks.
 
