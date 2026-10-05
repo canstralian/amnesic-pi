@@ -31,7 +31,15 @@ from .nft import (
     parse_chains,
     strip_chain_declaration,
 )
-from .sysctl import IPV4_FORWARD, IPV6_FORWARD_ALL, IPV6_FORWARD_DEFAULT, Sysctl, SysctlError
+from .sysctl import (
+    IPV4_FORWARD,
+    IPV6_DISABLE_ALL,
+    IPV6_DISABLE_DEFAULT,
+    IPV6_FORWARD_ALL,
+    IPV6_FORWARD_DEFAULT,
+    Sysctl,
+    SysctlError,
+)
 
 DEFAULT_TEMPLATE = Path("/usr/share/amnesic-pi/policy.nft.in")
 
@@ -74,7 +82,11 @@ LOCKDOWN_RULESET = f"""table {TABLE_FAMILY} {LOCKDOWN_TABLE_NAME} {{
 
 
 class AuthorityError(RuntimeError):
-    pass
+    #: True once the transaction touched the kernel and `lockdown` ran to
+    #: contain the failure. False only for the render-failure path in
+    #: `Authority.apply`, which fails before the kernel is touched at all --
+    #: a caller must not claim containment happened for that one.
+    locked_down: bool = True
 
 
 @dataclass(frozen=True)
@@ -123,11 +135,19 @@ def lockdown(nft: Nft, sysctl: Sysctl) -> list[Check]:
         installed, detail = False, str(exc)
     checks.append(Check("deny posture installed", installed, detail))
 
-    try:
-        nft.delete_table(TABLE_NAME)
-        removed, removed_detail = True, f"{TABLE_NAME} removed"
-    except NftError as exc:
-        removed, removed_detail = False, str(exc)
+    if installed:
+        try:
+            nft.delete_table(TABLE_NAME)
+            removed, removed_detail = True, f"{TABLE_NAME} removed"
+        except NftError as exc:
+            removed, removed_detail = False, str(exc)
+    else:
+        # The deny posture did not install. Removing the policy table now
+        # would open the exact "no table at all" window the comment above
+        # describes -- worse than leaving a stale policy table in place,
+        # which at least still filters something. Retained, not removed.
+        removed = False
+        removed_detail = "retained: deny posture did not install"
     checks.append(Check("policy table removed", removed, removed_detail))
 
     checks.extend(forwarding_checks(sysctl, expect_ipv4="0"))
@@ -145,6 +165,14 @@ def forwarding_checks(sysctl: Sysctl, expect_ipv4: str = "1") -> list[Check]:
         value = sysctl.read(knob)
         # Absent means IPv6 is compiled out, which satisfies the invariant.
         checks.append(Check(knob, value in {"0", None}, "absent" if value is None else value))
+    for knob in (IPV6_DISABLE_ALL, IPV6_DISABLE_DEFAULT):
+        # Forwarding off does not prove IPv6 itself is off -- a host could
+        # still hold an IPv6 address and talk directly, outside the Tor-only
+        # egress path forwarding governs. `config/99-amnesic-pi.conf` sets
+        # both of these to 1 ("Stage 1 deliberately has no IPv6 authority
+        # path"); this confirms that baseline still holds on the live kernel.
+        value = sysctl.read(knob)
+        checks.append(Check(knob, value in {"1", None}, "absent" if value is None else value))
     return checks
 
 
@@ -189,14 +217,20 @@ class Authority:
     def apply(self) -> None:
         """Install policy and grant forwarding, or fail closed.
 
-        Any exception raised out of here has already been through `lockdown`.
+        Every exception raised out of here carries `locked_down`: True once
+        the transaction has touched the kernel and `lockdown` ran to contain
+        it, False for the render failure below, which fails before any of
+        that -- the previous policy and forwarding state are untouched, so a
+        caller must not claim containment for this path.
         """
         # Render before touching the kernel: a configuration or template error
         # must not disturb a known-good ruleset.
         try:
             rendered = render_file(self.template, self.config, self._tor_uid())
         except (OSError, FirewallError) as exc:
-            raise AuthorityError(f"cannot render the firewall policy: {exc}") from exc
+            err = AuthorityError(f"cannot render the firewall policy: {exc}")
+            err.locked_down = False
+            raise err from exc
 
         try:
             self.require_topology()
@@ -353,6 +387,21 @@ class Authority:
         )
         return [Check(name, ok, "present" if ok else "missing") for name, ok in expectations]
 
+    def _allowed_output_accepts(self, uid: int) -> set[str]:
+        """The exhaustive set of `accept` lines the output chain may contain.
+
+        Anything else accepted out of this chain is an undocumented egress
+        principal, which AGENTS.md forbids outright.
+        """
+        uplink = self.config.uplink_if
+        return {
+            'oifname "lo" accept',
+            "ct state established,related accept",
+            f'oifname "{uplink}" udp sport 68 udp dport 67 ip daddr 255.255.255.255 accept',
+            f'oifname "{uplink}" udp sport 68 udp dport 67 ip daddr 0.0.0.0 accept',
+            f'oifname "{uplink}" meta skuid {uid} meta l4proto tcp accept',
+        }
+
     def _egress_checks(self, listing: str) -> list[Check]:
         try:
             body = strip_chain_declaration(chain_body(listing, "output"))
@@ -364,6 +413,23 @@ class Authority:
             return [Check("Tor UID holds the uplink TCP grant", False, str(exc))]
         bound_to_uplink = f'oifname "{self.config.uplink_if}"' in body
         tor_rule = f"skuid {uid}" in body
+
+        # The two checks above only prove the right substrings exist
+        # *somewhere* in the chain -- not that every `accept` verdict is one
+        # of them. `oifname "eth0" accept` would satisfy both while granting
+        # every process on the box unrestricted uplink egress, because the
+        # legitimate Tor rule elsewhere in the same chain still supplies
+        # `oifname "eth0"` and `skuid <uid>`. This checks every accept line
+        # individually against the exhaustive allowlist.
+        allowed = self._allowed_output_accepts(uid)
+        rogue = [
+            line
+            for line in (raw.strip() for raw in body.splitlines())
+            if line.endswith(" accept") and line not in allowed
+        ]
+        no_rogue_accepts = not rogue
+        rogue_detail = "; ".join(rogue) if rogue else "every accept verdict is on the allowlist"
+
         return [
             Check(
                 "output chain bound to the uplink interface",
@@ -375,6 +441,7 @@ class Authority:
                 tor_rule,
                 f"skuid {uid}" if tor_rule else f"no rule for uid {uid}",
             ),
+            Check("no accept verdict outside the output allowlist", no_rogue_accepts, rogue_detail),
         ]
 
     def _ruleset_wide_checks(self) -> list[Check]:

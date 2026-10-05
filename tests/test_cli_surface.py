@@ -167,3 +167,52 @@ def test_dns_port_check_does_not_match_a_port_that_merely_starts_with_it():
 
     ipv6_wildcard = "UNCONN 0      0      [::]:5353 [::]:*\n"
     assert verify_module._udp_port_listening(ipv6_wildcard, 5353)
+
+
+def test_cmd_apply_fails_when_its_own_post_apply_recheck_fails(monkeypatch, tmp_path):
+    """`apply`'s exit code must track its own re-verification, not just apply() itself.
+
+    `authority.apply()` verifies internally, but live state can move between
+    that check and `cmd_apply`'s own `authority.verify()` call. Printing FAIL
+    rows and still returning 0 would tell an operator -- and systemd's
+    ExecStart= -- that the transaction succeeded.
+    """
+    from amnesic_pi.authority import Check
+
+    class StubAuthority:
+        def apply(self):
+            return None
+
+        def verify(self):
+            return [Check("nft table", False, "mismatch after apply")]
+
+    monkeypatch.setattr(fw, "authority_for", lambda args: StubAuthority())
+    monkeypatch.setattr(fw, "require_root", lambda command: None)
+
+    args = fw.build_parser().parse_args(["--config", str(tmp_path / "unused.env"), "apply"])
+    assert fw.cmd_apply(args) == 1
+
+
+def test_cmd_apply_does_not_claim_lockdown_when_render_failed(monkeypatch, tmp_path, capsys):
+    """The stderr message must track whether lockdown actually ran.
+
+    A render failure (missing/bad template) never touches the kernel, so
+    `authority.apply()` raises an AuthorityError with `locked_down=False`.
+    Printing "appliance locked down" for that path would be false.
+    """
+    from amnesic_pi.authority import AuthorityError
+
+    class StubAuthority:
+        def apply(self):
+            err = AuthorityError("cannot render the firewall policy: boom")
+            err.locked_down = False
+            raise err
+
+    monkeypatch.setattr(fw, "authority_for", lambda args: StubAuthority())
+    monkeypatch.setattr(fw, "require_root", lambda command: None)
+
+    args = fw.build_parser().parse_args(["--config", str(tmp_path / "unused.env"), "apply"])
+    assert fw.cmd_apply(args) == 1
+    stderr = capsys.readouterr().err
+    assert "locked down" not in stderr
+    assert "previous state unchanged" in stderr

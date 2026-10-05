@@ -20,10 +20,19 @@ def cmd_apply(args: argparse.Namespace) -> int:
     try:
         authority.apply()
     except AuthorityError as exc:
-        print(f"firewall apply failed, appliance locked down: {exc}", file=sys.stderr)
+        if exc.locked_down:
+            print(f"firewall apply failed, appliance locked down: {exc}", file=sys.stderr)
+        else:
+            # The render-failure path: apply() never touched the kernel, so
+            # there is nothing to lock down. Claiming containment here would
+            # be false -- the previous policy and forwarding state hold.
+            print(f"firewall apply failed, previous state unchanged: {exc}", file=sys.stderr)
         return 1
-    report(authority.verify())
-    return 0
+    # apply() already verified internally, but live state can still move
+    # between that check and this one. This re-check's result must decide
+    # the exit code -- printing FAIL rows and returning 0 anyway would tell
+    # an operator, and systemd's ExecStart, that the transaction succeeded.
+    return 0 if report(authority.verify()) else 1
 
 
 def cmd_verify(args: argparse.Namespace) -> int:

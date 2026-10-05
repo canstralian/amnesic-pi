@@ -17,7 +17,7 @@ from fakes import FakeKernel, FakeNft, FakeNic, FakeSysctl
 
 from amnesic_pi.authority import Authority, AuthorityError, Check
 from amnesic_pi.config import Config
-from amnesic_pi.sysctl import IPV4_FORWARD, IPV6_FORWARD_ALL
+from amnesic_pi.sysctl import IPV4_FORWARD, IPV6_DISABLE_ALL, IPV6_FORWARD_ALL
 
 TEMPLATE = Path("network/policy.nft.in")
 TOR_UID = 4242
@@ -88,6 +88,57 @@ def test_ipv6_forwarding_is_never_granted(tmp_path: Path):
     harness = build(tmp_path)
     harness.authority.apply()
     assert harness.forwarding[IPV6_FORWARD_ALL] == "0"
+
+
+def test_verify_fails_if_ipv6_is_not_actually_disabled(tmp_path: Path):
+    """Forwarding off does not prove IPv6 itself is off.
+
+    `config/99-amnesic-pi.conf` sets both disable_ipv6 knobs to 1 ("Stage 1
+    deliberately has no IPv6 authority path"). If something re-enables IPv6
+    on the live kernel -- disable_ipv6 back to 0 -- while forwarding stays
+    off, `verify()` must still fail: the documented invariant is that IPv6
+    is disabled, not merely that it cannot forward.
+    """
+    harness = build(tmp_path)
+    harness.authority.apply()
+    assert all(check.ok for check in harness.authority.verify())
+
+    sysctl = harness.authority.sysctl
+    path = sysctl.root / IPV6_DISABLE_ALL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("0\n", encoding="utf-8")
+
+    failed = [check for check in harness.authority.verify() if not check.ok]
+    assert any(check.name == IPV6_DISABLE_ALL for check in failed)
+
+
+def test_verify_rejects_a_rogue_unrestricted_output_accept(tmp_path: Path):
+    """A substring match on the legitimate rule is not proof there is no other one.
+
+    `oifname "eth0"` and `skuid <uid>` both already appear in the chain from
+    the legitimate Tor rule. A second, unrestricted `oifname "eth0" accept`
+    line -- granting every process on the box uplink egress -- must not hide
+    behind those two substrings being merely *present somewhere* in the
+    chain.
+    """
+    harness = build(tmp_path)
+    harness.authority.apply()
+    tables = harness.tables
+    tables["inet amnesic_pi"] = tables["inet amnesic_pi"].replace(
+        'oifname "eth0" meta skuid 4242 meta l4proto tcp accept',
+        'oifname "eth0" meta skuid 4242 meta l4proto tcp accept\n'
+        '        oifname "eth0" accept',
+    )
+    checks = harness.authority.verify()
+    allowlist_check = next(
+        c for c in checks if c.name == "no accept verdict outside the output allowlist"
+    )
+    assert not allowlist_check.ok
+    assert 'oifname "eth0" accept' in allowlist_check.detail
+    # The two substring checks this finding was about must still both read
+    # as present -- that is exactly how the rogue rule used to hide.
+    assert next(c for c in checks if c.name == "output chain bound to the uplink interface").ok
+    assert next(c for c in checks if c.name == "Tor UID holds the uplink TCP grant").ok
 
 
 # -- fail-closed apply -----------------------------------------------------
@@ -269,6 +320,33 @@ def test_lockdown_disables_forwarding_first(tmp_path: Path):
     assert any(not check.ok for check in checks), "an incomplete lockdown must report failure"
 
 
+def test_lockdown_retains_the_policy_table_when_the_deny_posture_fails_to_install(
+    tmp_path: Path,
+):
+    """Never leave a window with no table at all.
+
+    The deny posture's chains hook ahead of the policy table's, so once it is
+    installed, removing the old policy table is safe. If the deny posture
+    itself never installed, removing the policy table first would leave
+    neither in place -- the kernel's own accept defaults, with nothing to
+    override them. Retaining a stale-but-present policy table is strictly
+    safer than that, so the deletion must not even be attempted.
+    """
+    harness = build(tmp_path)
+    harness.authority.apply()
+    policy_table = next(iter(harness.tables))
+
+    harness.nft.fail_load = True
+    checks = harness.authority.lockdown()
+
+    assert policy_table in harness.tables, "the policy table was removed with no deny posture up"
+    deny_check = next(c for c in checks if c.name == "deny posture installed")
+    table_check = next(c for c in checks if c.name == "policy table removed")
+    assert not deny_check.ok
+    assert not table_check.ok
+    assert "retained" in table_check.detail
+
+
 def test_lockdown_is_idempotent(tmp_path: Path):
     harness = build(tmp_path)
     harness.authority.apply()
@@ -312,6 +390,30 @@ def test_lockdown_runs_automatically_when_apply_fails(tmp_path: Path):
     tables = harness.tables
     assert "inet amnesic_pi_lockdown" in tables
     assert harness.forwarding[IPV4_FORWARD] == "0"
+
+
+def test_a_render_failure_never_touches_the_kernel_or_claims_lockdown(tmp_path: Path):
+    """Render happens before the kernel is touched; its failure must say so.
+
+    A missing or unreadable template file fails inside `render_file`, before
+    `require_topology`, before `disable_forwarding`, before anything kernel
+    side. A caller's error message claiming "appliance locked down" for this
+    path would be false: there is nothing to lock down, and a prior
+    successful apply's forwarding grant must survive untouched.
+    """
+    harness = build(tmp_path)
+    harness.authority.apply()
+    assert harness.forwarding[IPV4_FORWARD] == "1"
+    tables_before = dict(harness.tables)
+
+    object.__setattr__(harness.authority, "template", tmp_path / "does-not-exist.nft.in")
+
+    with pytest.raises(AuthorityError, match="cannot render the firewall policy") as excinfo:
+        harness.authority.apply()
+
+    assert excinfo.value.locked_down is False
+    assert harness.forwarding[IPV4_FORWARD] == "1", "a render failure must not touch forwarding"
+    assert harness.tables == tables_before, "a render failure must not touch the live ruleset"
 
 
 def test_apply_after_lockdown_restores_service(tmp_path: Path):
