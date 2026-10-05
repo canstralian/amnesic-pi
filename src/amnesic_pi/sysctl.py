@@ -45,9 +45,16 @@ class Sysctl:
         path = self.root / knob
         try:
             return path.read_text(encoding="utf-8").strip()
-        except OSError as exc:
+        except FileNotFoundError:
+            # The one OSError that actually means "this knob does not exist
+            # on this kernel" -- IPv6 compiled out, for the optional set.
             if knob in self.optional:
                 return None
+            raise SysctlError(f"cannot read {knob}: knob does not exist") from None
+        except OSError as exc:
+            # Anything else -- permission denied, an unreadable procfs entry
+            # -- is a real failure even for an optional knob. Reporting it as
+            # "absent" would let an unprovable IPv6 posture pass as satisfied.
             raise SysctlError(f"cannot read {knob}: {exc}") from exc
 
     def write(self, knob: str, value: str) -> None:
