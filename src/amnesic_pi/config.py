@@ -77,6 +77,18 @@ class Config:
                 raise ConfigError(f"MAC_IFACES contains an invalid interface name: {name!r}")
         if len(set(self.mac_ifaces)) != len(self.mac_ifaces):
             raise ConfigError("MAC_IFACES contains duplicate interface names")
+        if self.mac_ifaces:
+            # MAC_IFACES only ever adds to the mandatory set; it cannot narrow
+            # it. Letting an explicit value omit a role interface would pass
+            # validation while randomize-mac silently left that interface on
+            # its burned-in address -- the exact anonymity gate this field's
+            # own default exists to guarantee.
+            missing = {self.uplink_if, self.client_if} - set(self.mac_ifaces)
+            if missing:
+                raise ConfigError(
+                    "MAC_IFACES must include every role interface; missing "
+                    f"{sorted(missing)}"
+                )
 
         if not 0 < self.iface_wait_seconds <= 300:
             raise ConfigError("IFACE_WAIT_SECONDS must be greater than 0 and at most 300")

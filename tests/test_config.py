@@ -45,6 +45,27 @@ def test_mac_ifaces_reject_invalid_names(tmp_path: Path):
         load_env(p)
 
 
+def test_mac_ifaces_cannot_omit_a_role_interface(tmp_path: Path):
+    """MAC_IFACES only adds to the mandatory set; it cannot narrow it.
+
+    An explicit value naming only one role interface must not pass
+    validation -- `randomize-mac` would then silently leave the omitted
+    interface on its burned-in address, which is exactly the anonymity gate
+    the default (both role interfaces) exists to guarantee.
+    """
+    p = tmp_path / "network.env"
+    p.write_text("UPLINK_IF=eth0\nCLIENT_IF=eth1\nMAC_IFACES=eth0\n")
+    with pytest.raises(ConfigError, match="MAC_IFACES must include every role interface"):
+        load_env(p)
+
+
+def test_mac_ifaces_may_add_interfaces_beyond_the_role_pair(tmp_path: Path):
+    """Adding a third interface is the field's actual purpose; must still work."""
+    p = tmp_path / "network.env"
+    p.write_text("UPLINK_IF=eth0\nCLIENT_IF=eth1\nMAC_IFACES=eth0, eth1, eth2\n")
+    assert load_env(p).resolved_mac_ifaces() == ("eth0", "eth1", "eth2")
+
+
 def test_interface_wait_is_bounded(tmp_path: Path):
     """The enumeration retry is a budget, not an unbounded wait."""
     for value in ("0", "-1", "600"):
