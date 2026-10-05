@@ -144,6 +144,26 @@ def test_failure_paths_reach_lockdown(graph: unitgraph.Graph):
         assert LOCKDOWN in graph.on_failure[unit], f"{unit} has no OnFailure lockdown"
 
 
+def test_lockdown_unit_carries_no_configuration(root: Path):
+    """`cmd_lockdown` reads nothing from network.env; the unit must not either.
+
+    `EnvironmentFile=` is a [Service] directive, outside what `unitgraph`
+    resolves (it models [Unit] authority relationships only), so this reads
+    the installed file directly -- the same approach
+    `test_explicit_stop_also_reaches_lockdown` uses for ExecStop=.
+
+    An `EnvironmentFile=` pointing at a file the containment unit cannot
+    read -- wrong mode, wrong owner, not just missing -- would fail unit
+    activation before `ExecStart` runs: containment sharing a failure mode
+    with the thing it contains, which is exactly what this unit exists to
+    prevent.
+    """
+    text = (root / LOCKDOWN).read_text(encoding="utf-8")
+    offending = [line for line in text.splitlines() if line.strip().startswith("EnvironmentFile=")]
+    assert not offending, (
+        f"{LOCKDOWN} declares {offending}, but cmd_lockdown takes no configuration"
+    )
+
 
 def test_explicit_stop_also_reaches_lockdown(root: Path):
     """OnFailure= is not a universal cleanup mechanism.

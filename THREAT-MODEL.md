@@ -21,9 +21,11 @@ In normal mode, only the Tor daemon receives outbound Internet TCP authority. DH
 
 ### P2a0. Containment does not share a failure mode with what it contains
 
-`amnesic-pi-firewall lockdown` reads no configuration. A malformed
-`network.env` must not be able to break both the firewall unit and the
-`OnFailure=` lockdown that exists to contain it.
+`amnesic-pi-firewall lockdown` reads no configuration -- not from
+`network.env`, and not from an `EnvironmentFile=` on the unit itself. A
+malformed `network.env`, or one the containment unit cannot read, must not be
+able to break both the firewall unit and the `OnFailure=` lockdown that
+exists to contain it.
 
 ### P2a1. A sustained post-Tor posture failure also revokes authority
 
