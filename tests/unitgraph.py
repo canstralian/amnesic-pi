@@ -77,9 +77,18 @@ def materialize(root: Path) -> Path:
     return root
 
 
-def _parse(path: Path) -> dict[str, list[str]]:
-    """Parse one unit file's [Unit] section, honouring line continuations."""
+def _parse(path: Path) -> tuple[dict[str, list[str]], set[str]]:
+    """Parse one unit file's [Unit] section, honouring line continuations.
+
+    Returns the directives plus the set of list-directive keys this *file*
+    reset (an empty assignment). The reset set is what lets a caller merging
+    this file with others tell "this file reset the key, and set nothing
+    after it" (key present here with an empty list) apart from "this file
+    never mentions the key at all" (key absent here) -- both would otherwise
+    look identical to a caller that only sees the final value list.
+    """
     directives: dict[str, list[str]] = defaultdict(list)
+    reset: set[str] = set()
     section = ""
     pending = ""
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -100,9 +109,10 @@ def _parse(path: Path) -> dict[str, list[str]]:
         if key in LIST_DIRECTIVES and value == "":
             # An empty assignment resets the list, exactly as systemd does.
             directives[key] = []
+            reset.add(key)
             continue
         directives[key].append(value)
-    return dict(directives)
+    return dict(directives), reset
 
 
 def _merge(root: Path, unit: str) -> dict[str, list[str]]:
@@ -115,9 +125,21 @@ def _merge(root: Path, unit: str) -> dict[str, list[str]]:
     merged: dict[str, list[str]] = defaultdict(list)
 
     def absorb(path: Path) -> None:
-        for key, values in _parse(path).items():
+        values_by_key, reset_keys = _parse(path)
+        for key, values in values_by_key.items():
             if key in LIST_DIRECTIVES:
-                merged[key].extend(values)
+                if key in reset_keys:
+                    # This file reset the key -- clear whatever the base
+                    # unit or an earlier drop-in had accumulated, then take
+                    # only what this file set after the reset (nothing, if
+                    # it reset and never re-added). Without this, a drop-in
+                    # that resets BindsTo= to remove an authority edge would
+                    # extend an empty list onto the existing one -- a no-op
+                    # that leaves the edge in place and the resolver unaware
+                    # anything happened.
+                    merged[key] = list(values)
+                else:
+                    merged[key].extend(values)
             else:
                 merged[key] = values
 

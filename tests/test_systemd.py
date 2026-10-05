@@ -278,3 +278,64 @@ def test_drop_ins_land_on_the_units_they_are_meant_to_gate():
     assert destinations["tor-amnesic-pi.conf"].startswith("tor@default.service.d/")
     assert destinations["networkd-amnesic-pi.conf"].startswith("systemd-networkd.service.d/")
     assert destinations["NetworkManager-amnesic-pi.conf"].startswith("NetworkManager.service.d/")
+
+
+# -- the resolver's own correctness ----------------------------------------
+
+
+def test_a_drop_in_reset_actually_clears_the_base_units_list(tmp_path: Path):
+    """A drop-in's `BindsTo=` (empty) must clear what the base unit set.
+
+    `BindsTo=`/`Before=`/etc. are additive across drop-ins by default -- that
+    is the whole point of `LIST_DIRECTIVES`. But systemd also lets a drop-in
+    *reset* one with an empty assignment, and this resolver has to honour
+    that too. If it silently extended an empty list onto the existing one
+    instead, a drop-in removing an authority edge would leave the resolved
+    graph unchanged, and `tests/test_systemd.py`'s whole premise -- that a
+    downgraded `BindsTo=` turns a test red -- would not hold for this
+    particular downgrade path.
+    """
+    (tmp_path / "fake.service").write_text(
+        "[Unit]\nBindsTo=amnesic-pi-firewall.service\n\n[Service]\nExecStart=/bin/true\n",
+        encoding="utf-8",
+    )
+    dropin_dir = tmp_path / "fake.service.d"
+    dropin_dir.mkdir()
+    (dropin_dir / "override.conf").write_text("[Unit]\nBindsTo=\n", encoding="utf-8")
+
+    merged = unitgraph._merge(tmp_path, "fake.service")
+
+    assert merged.get("BindsTo", []) == [], (
+        "the drop-in's reset did not clear the base unit's BindsTo="
+    )
+
+
+def test_a_drop_in_can_reset_and_then_set_its_own_value(tmp_path: Path):
+    """Reset-then-set within one drop-in must replace, not append to, the prior value."""
+    (tmp_path / "fake.service").write_text(
+        "[Unit]\nBindsTo=old.service\n\n[Service]\nExecStart=/bin/true\n", encoding="utf-8"
+    )
+    dropin_dir = tmp_path / "fake.service.d"
+    dropin_dir.mkdir()
+    (dropin_dir / "override.conf").write_text(
+        "[Unit]\nBindsTo=\nBindsTo=new.service\n", encoding="utf-8"
+    )
+
+    merged = unitgraph._merge(tmp_path, "fake.service")
+
+    assert merged["BindsTo"] == ["new.service"], merged["BindsTo"]
+
+
+def test_a_drop_in_without_the_key_does_not_disturb_it(tmp_path: Path):
+    """The ordinary additive case this resolver depends on everywhere else."""
+    (tmp_path / "fake.service").write_text(
+        "[Unit]\nBindsTo=base.service\n\n[Service]\nExecStart=/bin/true\n", encoding="utf-8"
+    )
+    dropin_dir = tmp_path / "fake.service.d"
+    dropin_dir.mkdir()
+    (dropin_dir / "extra.conf").write_text("[Unit]\nAfter=something.service\n", encoding="utf-8")
+
+    merged = unitgraph._merge(tmp_path, "fake.service")
+
+    assert merged["BindsTo"] == ["base.service"]
+    assert merged["After"] == ["something.service"]
