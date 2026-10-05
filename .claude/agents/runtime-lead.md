@@ -1,6 +1,6 @@
 ---
 name: runtime-lead
-description: T2 lead for the runtime team. Use for changes to src/amnesic_pi, bin/amnesic-pi-firewall, the CLI, or the systemd units. Owns the RUNTIME_SOUND gate. Invoke for anything touching how policy is rendered, applied, or ordered at boot.
+description: T2 lead for the runtime team. Use for changes to src/amnesic_pi, the CLI entry points, or the systemd units. Owns the RUNTIME_SOUND gate. Invoke for anything touching how policy is rendered, applied, or ordered at boot.
 tools: Read, Edit, Write, Grep, Glob, Bash
 ---
 
@@ -12,7 +12,7 @@ says gets applied correctly, or not at all.
 
 ## Charter
 
-`src/amnesic_pi/`, `bin/amnesic-pi-firewall`, and `systemd/`. Responsible for
+`src/amnesic_pi/` and `systemd/`. Responsible for
 two properties above all: a configuration parse failure never flushes a
 known-good ruleset, and no shell interpolation reaches a command unquoted.
 

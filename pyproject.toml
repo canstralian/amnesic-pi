@@ -14,15 +14,20 @@ dependencies = []
 
 [project.scripts]
 amnesic-pi = "amnesic_pi.cli:main"
+amnesic-pi-anon = "amnesic_pi.anon:main"
+amnesic-pi-firewall = "amnesic_pi.fw:main"
 amnesic-orchestrator = "orchestrator.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "netns: packet-level fail-closed tests needing root and network namespaces",
+]
 
 [tool.ruff]
 target-version = "py311"

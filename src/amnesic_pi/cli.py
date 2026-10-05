@@ -1,28 +1,31 @@
+"""The `amnesic-pi` umbrella command.
+
+Three executables exist, matching the boot stages they gate:
+
+    amnesic-pi-anon      pre-network anonymity (MAC, zero-IP) and, at the other
+                         end of the boot, post-Tor egress posture
+    amnesic-pi-firewall  the authority transaction (apply / verify / lockdown)
+    amnesic-pi           umbrella carrying both, plus render-firewall
+
+The systemd units call the stage-specific names so a unit file reads as the
+stage it gates.
+"""
+
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
-import tempfile
-from pathlib import Path
+from collections.abc import Sequence
 
-from .config import ConfigError, load_env
+from .anon import cmd_randomize_mac, cmd_verify_tor_path, cmd_verify_zero_ip
+from .clihelp import add_common, authority_for, load_config, report
 from .firewall import FirewallError, render_file, tor_uid
-from .verify import verify
-
-DEFAULT_CONFIG = Path("/etc/amnesic-pi/network.env")
-DEFAULT_TEMPLATE = Path("/usr/share/amnesic-pi/policy.nft.in")
-
-
-def _load(path: Path):
-    try:
-        return load_env(path)
-    except (OSError, ConfigError) as exc:
-        raise SystemExit(f"configuration error: {exc}") from exc
+from .fw import cmd_apply, cmd_lockdown, cmd_verify
+from .verify import verify as verify_posture
 
 
 def cmd_render(args: argparse.Namespace) -> int:
-    config = _load(args.config)
+    config = load_config(args.config)
     try:
         uid = args.tor_uid if args.tor_uid is not None else tor_uid(config)
         rendered = render_file(args.template, config, uid)
@@ -33,77 +36,84 @@ def cmd_render(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_apply(args: argparse.Namespace) -> int:
-    if hasattr(os := __import__("os"), "geteuid") and os.geteuid() != 0:
-        print("apply-firewall must run as root", file=sys.stderr)
-        return 2
-    config = _load(args.config)
-    try:
-        rendered = render_file(args.template, config, tor_uid(config))
-    except (OSError, FirewallError) as exc:
-        print(f"firewall render error: {exc}", file=sys.stderr)
-        return 2
+def cmd_verify_all(args: argparse.Namespace) -> int:
+    """Read-only: the firewall posture plus the Tor listener checks.
 
-    # Replace only our table. nft batches are transactional: if any command fails,
-    # the existing ruleset remains unchanged. The delete command is included only
-    # when the table currently exists so first boot does not fail on ENOENT.
-    present = subprocess.run(
-        ["nft", "list", "table", "inet", "amnesic_pi"],
-        text=True,
-        capture_output=True,
-        check=False,
-    ).returncode == 0
-    transaction = ("delete table inet amnesic_pi\n" if present else "") + rendered
-
-    with tempfile.NamedTemporaryFile("w", prefix="amnesic-pi-", suffix=".nft", delete=False) as fh:
-        fh.write(transaction)
-        candidate = Path(fh.name)
-    try:
-        check = subprocess.run(["nft", "-c", "-f", str(candidate)], check=False)
-        if check.returncode != 0:
-            print("candidate nftables policy failed validation; existing ruleset untouched", file=sys.stderr)
-            return check.returncode
-        apply = subprocess.run(["nft", "-f", str(candidate)], check=False)
-        return apply.returncode
-    finally:
-        candidate.unlink(missing_ok=True)
+    Kept distinct from `firewall verify`, which is deliberately about network
+    authority alone. Neither mutates the system. Neither is a substitute for
+    `anon verify-tor-path`, which is the only command that exercises the Tor
+    path itself.
+    """
+    config = load_config(args.config)
+    return 0 if report(verify_posture(config, authority=authority_for(args))) else 1
 
 
-def cmd_verify(args: argparse.Namespace) -> int:
-    config = _load(args.config)
-    checks = verify(config)
-    width = max(len(c.name) for c in checks)
-    failed = False
-    for check in checks:
-        status = "PASS" if check.ok else "FAIL"
-        failed |= not check.ok
-        print(f"{status:4}  {check.name:<{width}}  {check.detail}")
-    return 1 if failed else 0
+def _add_firewall_subcommands(sub: argparse._SubParsersAction) -> None:
+    apply_cmd = sub.add_parser(
+        "apply", help="verify topology, install policy, verify it, then grant forwarding"
+    )
+    apply_cmd.set_defaults(func=cmd_apply)
+
+    verify_cmd = sub.add_parser("verify", help="read-only check of the live security posture")
+    verify_cmd.set_defaults(func=cmd_verify)
+
+    lockdown_cmd = sub.add_parser(
+        "lockdown", help="disable forwarding, then install an unconditional deny posture"
+    )
+    lockdown_cmd.set_defaults(func=cmd_lockdown)
+
+
+def _add_anon_subcommands(sub: argparse._SubParsersAction) -> None:
+    mac = sub.add_parser(
+        "randomize-mac", help="randomize interface MACs and verify the change took effect"
+    )
+    mac.set_defaults(func=cmd_randomize_mac)
+
+    zero_ip = sub.add_parser(
+        "verify-zero-ip", help="assert the role interfaces carry no IP before the network starts"
+    )
+    zero_ip.set_defaults(func=cmd_verify_zero_ip)
+
+    tor_path = sub.add_parser(
+        "verify-tor-path",
+        help="post-Tor egress posture verification; runs after Tor, never before the firewall",
+    )
+    tor_path.add_argument("--require-observation", action="store_true")
+    tor_path.set_defaults(func=cmd_verify_tor_path)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="amnesic-pi")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    add_common(parser)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    render = sub.add_parser("render-firewall")
-    render.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE)
+    render = sub.add_parser("render-firewall", help="print the rendered nftables policy")
     render.add_argument("--tor-uid", type=int)
     render.set_defaults(func=cmd_render)
 
-    apply = sub.add_parser("apply-firewall")
-    apply.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE)
-    apply.set_defaults(func=cmd_apply)
+    firewall = sub.add_parser("firewall", help="firewall authority transaction")
+    _add_firewall_subcommands(firewall.add_subparsers(dest="firewall_command", required=True))
 
-    verify_cmd = sub.add_parser("verify")
-    verify_cmd.set_defaults(func=cmd_verify)
+    anon = sub.add_parser("anon", help="anonymity stages")
+    _add_anon_subcommands(anon.add_subparsers(dest="anon_command", required=True))
+
+    # Retained spellings from before the authority model was split into stages.
+    # `apply-firewall` now runs the full transaction, so it is no longer
+    # possible to apply policy without also proving it before forwarding.
+    legacy_apply = sub.add_parser("apply-firewall", help="alias for `firewall apply`")
+    legacy_apply.set_defaults(func=cmd_apply)
+
+    legacy_verify = sub.add_parser(
+        "verify", help="firewall posture plus Tor listener checks (read-only)"
+    )
+    legacy_verify.set_defaults(func=cmd_verify_all)
     return parser
 
 
-def main() -> None:
-    args = build_parser().parse_args()
-    raise SystemExit(args.func(args))
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

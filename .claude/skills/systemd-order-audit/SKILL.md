@@ -25,8 +25,12 @@ BOOT -> FIREWALL DENY -> TOR -> VERIFY -> TOR-ONLY CLIENT CONNECTIVITY
    both matter.
 3. `tor-amnesic-pi.conf` drop-in does not weaken the ordering or add a
    `Restart=` that masks repeated Tor failure.
-4. `amnesic-pi-verify.service` runs after Tor and its failure is visible — a
-   verify unit whose failure is ignored is decoration.
+4. `amnesic-pi-posture.service` runs after Tor and its failure is visible — a
+   verify unit whose failure is ignored is decoration. It also carries
+   `OnFailure=amnesic-pi-lockdown.service`, same as the firewall and
+   anonymity stages: check that `verify-tor-path` bounds its own retry
+   (`TOR_WAIT_SECONDS`) before returning nonzero, or Tor's own bootstrap
+   timing will trip lockdown on a clean boot.
 5. Cross-check against `tests/test_systemd.py`. If the test does not assert the
    ordering you just read, that is a finding: the assertion is missing.
 

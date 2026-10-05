@@ -1,0 +1,218 @@
+"""The command surface the systemd units and the runbook depend on.
+
+A rename here silently breaks a unit file or a documented operator step, so the
+surface itself is asserted.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+from fakes import FakeKernel, FakeNft, FakeNic, FakeSysctl
+
+from amnesic_pi import anon, cli, fw
+from amnesic_pi.authority import Authority
+from amnesic_pi.clihelp import report
+from amnesic_pi.config import Config
+
+TEMPLATE = Path("network/policy.nft.in")
+
+
+def subcommands(parser) -> set[str]:
+    found: set[str] = set()
+    for action in parser._actions:
+        if hasattr(action, "choices") and action.choices:
+            found.update(action.choices)
+    return found
+
+
+def test_firewall_command_exposes_apply_verify_lockdown():
+    assert {"apply", "verify", "lockdown"} <= subcommands(fw.build_parser())
+
+
+def test_anon_command_exposes_the_three_stages():
+    assert {"randomize-mac", "verify-zero-ip", "verify-tor-path"} <= subcommands(
+        anon.build_parser()
+    )
+
+
+def test_umbrella_keeps_the_previous_spellings_working():
+    """`apply-firewall` and `verify` are documented; they must keep working."""
+    parser = cli.build_parser()
+    assert {"render-firewall", "apply-firewall", "verify", "firewall", "anon"} <= subcommands(
+        parser
+    )
+    assert parser.parse_args(["apply-firewall"]).func is fw.cmd_apply
+
+
+def test_legacy_verify_covers_firewall_posture_and_tor_listeners():
+    """The old `amnesic-pi verify` meaning is preserved, not quietly narrowed."""
+    parser = cli.build_parser()
+    assert parser.parse_args(["verify"]).func is cli.cmd_verify_all
+    assert parser.parse_args(["firewall", "verify"]).func is fw.cmd_verify
+
+
+def test_verify_commands_do_not_require_root():
+    """A read-only check must be usable without escalating."""
+    parser = cli.build_parser()
+    for argv in (["verify"], ["firewall", "verify"], ["anon", "verify-zero-ip"]):
+        assert parser.parse_args(argv).func is not None
+
+
+@pytest.mark.parametrize("argv", [["firewall", "apply"], ["firewall", "lockdown"]])
+def test_mutating_commands_refuse_to_run_unprivileged(argv, monkeypatch, tmp_path):
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    env = tmp_path / "network.env"
+    env.write_text("UPLINK_IF=eth0\nCLIENT_IF=eth1\n", encoding="utf-8")
+    args = cli.build_parser().parse_args(["--config", str(env), *argv])
+    assert args.func(args) == 2
+
+
+def test_report_treats_observations_as_non_blocking(capsys):
+    """WARN must not become FAIL, or an echo outage would block the boot."""
+
+    class Observation:
+        name, ok, detail, blocking = "echo", False, "unreachable", False
+
+    class HardFailure:
+        name, ok, detail, blocking = "nft table", False, "missing", True
+
+    assert report([Observation()]) is True
+    assert report([HardFailure()]) is False
+    output = capsys.readouterr().out
+    assert "WARN" in output and "FAIL" in output
+
+
+def test_render_firewall_does_not_touch_the_kernel(tmp_path, capsys):
+    """Reviewing the policy must be safe before any authority exists."""
+    env = tmp_path / "network.env"
+    env.write_text("UPLINK_IF=eth0\nCLIENT_IF=eth1\n", encoding="utf-8")
+    args = cli.build_parser().parse_args(
+        ["--config", str(env), "--template", str(TEMPLATE), "render-firewall", "--tor-uid", "4242"]
+    )
+    assert args.func(args) == 0
+    rendered = capsys.readouterr().out
+    assert "skuid 4242" in rendered
+    assert "@UPLINK_IF@" not in rendered
+
+
+def test_verify_module_reports_firewall_and_listener_checks(tmp_path, monkeypatch):
+    from amnesic_pi import verify as verify_module
+
+    kernel = FakeKernel(
+        sysfs=tmp_path / "net",
+        nics={"eth0": FakeNic(address="02:00:00:00:00:01"),
+              "eth1": FakeNic(address="02:00:00:00:00:02")},
+    )
+    authority = Authority(
+        config=Config("eth0", "eth1", iface_wait_seconds=1),
+        nft=FakeNft().interface(),
+        sysctl=FakeSysctl.build(tmp_path / "proc"),
+        interfaces=kernel.interfaces(),
+        template=TEMPLATE,
+        uid=4242,
+    )
+    monkeypatch.setattr(verify_module, "_port_open", lambda port: False)
+    checks = verify_module.verify(Config("eth0", "eth1"), authority=authority)
+    names = {check.name for check in checks}
+    assert "nft table" in names
+    assert "Tor TransPort" in names
+    assert "Tor DNSPort" in names
+
+
+def test_verify_reports_a_failed_check_when_ss_is_missing(monkeypatch):
+    """An absent `ss` must produce a FAIL row, not a FileNotFoundError.
+
+    The same defect class as the missing `ethtool`/`ip`/`nft` crash, in the one
+    module that had kept its own `subprocess.run`. `verify` promises that a
+    check which cannot be performed fails, and a traceback is not a failed
+    check. Without this the module raises on any host without iproute2, and
+    `test_verify_module_reports_firewall_and_listener_checks` above errors
+    rather than asserting.
+    """
+    from amnesic_pi import netif
+    from amnesic_pi import verify as verify_module
+
+    def missing(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(netif.subprocess, "run", missing)
+    monkeypatch.setattr(verify_module, "_port_open", lambda port: False)
+
+    checks = verify_module.tor_listener_checks(Config("eth0", "eth1"))
+
+    dns = next(check for check in checks if check.name == "Tor DNSPort")
+    assert dns.ok is False
+
+
+def test_dns_port_check_does_not_match_a_port_that_merely_starts_with_it():
+    """`:5353` is a substring of `0.0.0.0:53530` -- a real `ss` line.
+
+    A completely unrelated UDP listener on 53530 must not satisfy a check
+    meant to prove Tor's DNSPort (5353) is listening. Reproduces exactly the
+    `ss -H -lun` line this appliance would see on a real kernel.
+    """
+    from amnesic_pi import verify as verify_module
+
+    unrelated_listener_only = "UNCONN 0      0      0.0.0.0:53530 0.0.0.0:*\n"
+    assert not verify_module._udp_port_listening(unrelated_listener_only, 5353)
+
+    real_listener = "UNCONN 0      0      0.0.0.0:5353 0.0.0.0:*\n"
+    assert verify_module._udp_port_listening(real_listener, 5353)
+
+    both = unrelated_listener_only + real_listener
+    assert verify_module._udp_port_listening(both, 5353)
+
+    ipv6_wildcard = "UNCONN 0      0      [::]:5353 [::]:*\n"
+    assert verify_module._udp_port_listening(ipv6_wildcard, 5353)
+
+
+def test_cmd_apply_fails_when_its_own_post_apply_recheck_fails(monkeypatch, tmp_path):
+    """`apply`'s exit code must track its own re-verification, not just apply() itself.
+
+    `authority.apply()` verifies internally, but live state can move between
+    that check and `cmd_apply`'s own `authority.verify()` call. Printing FAIL
+    rows and still returning 0 would tell an operator -- and systemd's
+    ExecStart= -- that the transaction succeeded.
+    """
+    from amnesic_pi.authority import Check
+
+    class StubAuthority:
+        def apply(self):
+            return None
+
+        def verify(self):
+            return [Check("nft table", False, "mismatch after apply")]
+
+    monkeypatch.setattr(fw, "authority_for", lambda args: StubAuthority())
+    monkeypatch.setattr(fw, "require_root", lambda command: None)
+
+    args = fw.build_parser().parse_args(["--config", str(tmp_path / "unused.env"), "apply"])
+    assert fw.cmd_apply(args) == 1
+
+
+def test_cmd_apply_does_not_claim_lockdown_when_render_failed(monkeypatch, tmp_path, capsys):
+    """The stderr message must track whether lockdown actually ran.
+
+    A render failure (missing/bad template) never touches the kernel, so
+    `authority.apply()` raises an AuthorityError with `locked_down=False`.
+    Printing "appliance locked down" for that path would be false.
+    """
+    from amnesic_pi.authority import AuthorityError
+
+    class StubAuthority:
+        def apply(self):
+            err = AuthorityError("cannot render the firewall policy: boom")
+            err.locked_down = False
+            raise err
+
+    monkeypatch.setattr(fw, "authority_for", lambda args: StubAuthority())
+    monkeypatch.setattr(fw, "require_root", lambda command: None)
+
+    args = fw.build_parser().parse_args(["--config", str(tmp_path / "unused.env"), "apply"])
+    assert fw.cmd_apply(args) == 1
+    stderr = capsys.readouterr().err
+    assert "locked down" not in stderr
+    assert "previous state unchanged" in stderr

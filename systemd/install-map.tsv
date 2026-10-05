@@ -1,0 +1,17 @@
+# Installation map for the Amnesic Pi systemd units.
+#
+# Single source of truth, read by BOTH image/provision.sh and
+# tests/test_systemd.py. The tests resolve the dependency graph from the
+# destination layout, so they verify the graph as it will actually be
+# installed -- a drop-in that lands on the wrong unit fails CI rather than
+# silently gating nothing.
+#
+# source<TAB>destination (relative to /etc/systemd/system)
+amnesic-pi-anon.service	amnesic-pi-anon.service
+amnesic-pi-firewall.service	amnesic-pi-firewall.service
+amnesic-pi-lockdown.service	amnesic-pi-lockdown.service
+amnesic-pi-posture.service	amnesic-pi-posture.service
+amnesic-pi-ready.target	amnesic-pi-ready.target
+tor-amnesic-pi.conf	tor@default.service.d/10-amnesic-pi.conf
+networkd-amnesic-pi.conf	systemd-networkd.service.d/10-amnesic-pi.conf
+NetworkManager-amnesic-pi.conf	NetworkManager.service.d/10-amnesic-pi.conf
