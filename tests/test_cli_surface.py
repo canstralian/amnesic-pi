@@ -145,3 +145,25 @@ def test_verify_reports_a_failed_check_when_ss_is_missing(monkeypatch):
 
     dns = next(check for check in checks if check.name == "Tor DNSPort")
     assert dns.ok is False
+
+
+def test_dns_port_check_does_not_match_a_port_that_merely_starts_with_it():
+    """`:5353` is a substring of `0.0.0.0:53530` -- a real `ss` line.
+
+    A completely unrelated UDP listener on 53530 must not satisfy a check
+    meant to prove Tor's DNSPort (5353) is listening. Reproduces exactly the
+    `ss -H -lun` line this appliance would see on a real kernel.
+    """
+    from amnesic_pi import verify as verify_module
+
+    unrelated_listener_only = "UNCONN 0      0      0.0.0.0:53530 0.0.0.0:*\n"
+    assert not verify_module._udp_port_listening(unrelated_listener_only, 5353)
+
+    real_listener = "UNCONN 0      0      0.0.0.0:5353 0.0.0.0:*\n"
+    assert verify_module._udp_port_listening(real_listener, 5353)
+
+    both = unrelated_listener_only + real_listener
+    assert verify_module._udp_port_listening(both, 5353)
+
+    ipv6_wildcard = "UNCONN 0      0      [::]:5353 [::]:*\n"
+    assert verify_module._udp_port_listening(ipv6_wildcard, 5353)

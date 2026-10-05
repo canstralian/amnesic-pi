@@ -37,6 +37,29 @@ def _port_open(port: int) -> bool:
         return False
 
 
+def _udp_port_listening(stdout: str, port: int) -> bool:
+    """Does any line of `ss -H -lun` output show a listener on exactly `port`?
+
+    Not a substring match: `:5353` is a substring of `0.0.0.0:53530`, so a
+    completely unrelated UDP listener on 53530 would satisfy a check meant to
+    prove port 5353. The local-address:port field is always the fourth
+    whitespace-separated column in `ss -H` output (no header, so this is the
+    first row); the port itself is whatever follows the *last* `:`, which
+    handles bracketed IPv6 forms (`[::]:5353`) the same as IPv4.
+    """
+    target = str(port)
+    for line in stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        local = fields[3]
+        if ":" not in local:
+            continue
+        if local.rsplit(":", 1)[1] == target:
+            return True
+    return False
+
+
 def tor_listener_checks(config: Config) -> list[Check]:
     """Confirm the configured Tor listeners exist.
 
@@ -48,10 +71,9 @@ def tor_listener_checks(config: Config) -> list[Check]:
     # DNSPort is UDP and cannot be proven with a TCP connect probe; listener
     # state is read from `ss` instead.
     ss = _run("ss", "-H", "-lun")
-    marker = f":{config.dns_port}"
-    checks.append(
-        Check("Tor DNSPort", ss.returncode == 0 and marker in (ss.stdout or ""), marker)
-    )
+    detail = str(config.dns_port)
+    listening = ss.returncode == 0 and _udp_port_listening(ss.stdout or "", config.dns_port)
+    checks.append(Check("Tor DNSPort", listening, detail))
     return checks
 
 
