@@ -125,6 +125,127 @@ def test_verify_tor_path_reports_hard_failures_when_tor_is_absent(tmp_path: Path
     assert any("Tor" in name for name in names)
 
 
+# -- bounded retry for Tor's own bootstrap timing --------------------------
+
+
+class FakeClock:
+    """Injectable monotonic clock. Only advances when told to."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, by: float) -> None:
+        self.now += by
+
+
+def _checker_sequence(*results: list[PostureCheck]):
+    """A fake `verify_tor_path`: returns each result in order, then repeats
+    the last one. Records how many times it was called."""
+    calls: list[int] = []
+    sequence = iter(results)
+
+    def checker(config, authority, require_observation, probe_timeout):
+        calls.append(1)
+        try:
+            return next(sequence)
+        except StopIteration:
+            return results[-1]
+
+    checker.calls = calls
+    return checker
+
+
+def test_wait_for_tor_path_returns_immediately_on_first_success(tmp_path: Path):
+    """A transient retry loop must not slow down the common case."""
+    authority = build_authority(tmp_path)
+    passing = [PostureCheck("Tor bootstrapped", True, "ok")]
+    checker = _checker_sequence(passing)
+    slept: list[float] = []
+
+    result = torpath.wait_for_tor_path(
+        Config("eth0", "eth1"),
+        authority,
+        checker=checker,
+        clock=FakeClock(),
+        sleep=slept.append,
+        wait_seconds=10.0,
+    )
+
+    assert result == passing
+    assert len(checker.calls) == 1
+    assert slept == []
+
+
+def test_wait_for_tor_path_retries_until_success_within_budget(tmp_path: Path):
+    """Tor not having bootstrapped yet must be absorbed, not surfaced."""
+    authority = build_authority(tmp_path)
+    failing = [PostureCheck("Tor bootstrapped", False, "not yet")]
+    passing = [PostureCheck("Tor bootstrapped", True, "ok")]
+    checker = _checker_sequence(failing, failing, passing)
+    slept: list[float] = []
+
+    result = torpath.wait_for_tor_path(
+        Config("eth0", "eth1"),
+        authority,
+        checker=checker,
+        clock=FakeClock(),
+        sleep=slept.append,
+        wait_seconds=10.0,
+        poll=2.0,
+    )
+
+    assert result == passing
+    assert len(checker.calls) == 3
+    assert slept == [2.0, 2.0]
+
+
+def test_wait_for_tor_path_exhausts_the_budget_and_returns_the_last_failure(tmp_path: Path):
+    """A sustained failure must still fail -- the retry is bounded, not a loop."""
+    authority = build_authority(tmp_path)
+    failing = [PostureCheck("Tor bootstrapped", False, "still not ready")]
+    checker = _checker_sequence(failing, failing, failing, failing, failing)
+    clock = FakeClock()
+
+    result = torpath.wait_for_tor_path(
+        Config("eth0", "eth1"),
+        authority,
+        checker=checker,
+        clock=clock,
+        sleep=clock.advance,
+        wait_seconds=5.0,
+        poll=3.0,
+    )
+
+    assert result == failing
+    assert any(check.blocking for check in result)
+    # t=0 (fail, sleep->3), t=3 (fail, sleep->6), t=6 (deadline 5 already passed): 3 calls.
+    assert len(checker.calls) == 3
+
+
+def test_wait_for_tor_path_defaults_its_budget_to_the_configured_value(tmp_path: Path):
+    """With no explicit `wait_seconds`, the budget comes from the config."""
+    authority = build_authority(tmp_path)
+    failing = [PostureCheck("Tor bootstrapped", False, "not yet")]
+    checker = _checker_sequence(failing, failing, failing)
+    clock = FakeClock()
+
+    torpath.wait_for_tor_path(
+        Config("eth0", "eth1", tor_wait_seconds=7.0),
+        authority,
+        checker=checker,
+        clock=clock,
+        sleep=clock.advance,
+        poll=7.0,
+    )
+
+    # t=0 (fail, sleep->7), t=7 (deadline 7 reached): 2 calls. A hardcoded
+    # function-level default would not produce this number.
+    assert len(checker.calls) == 2
+
+
 # -- exit-IP rotation is not an invariant ----------------------------------
 
 

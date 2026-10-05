@@ -18,7 +18,7 @@ from .authority import Authority, Check
 from .clihelp import add_common, authority_for, load_config, report, require_root
 from .mac import MacError, randomize_interface
 from .netif import InterfaceError, NetworkInterfaces
-from .torpath import verify_tor_path
+from .torpath import wait_for_tor_path
 
 
 def cmd_randomize_mac(args: argparse.Namespace) -> int:
@@ -89,9 +89,16 @@ def cmd_verify_zero_ip(args: argparse.Namespace) -> int:
 
 
 def cmd_verify_tor_path(args: argparse.Namespace) -> int:
+    """Post-Tor posture, with a bounded retry for Tor's own bootstrap timing.
+
+    `amnesic-pi-posture.service` now runs `lockdown` via `OnFailure=` when
+    this exits nonzero, so a transient "Tor isn't ready yet" must be absorbed
+    here rather than surfacing as a posture failure. See
+    `torpath.wait_for_tor_path`.
+    """
     config = load_config(args.config)
     authority: Authority = authority_for(args)
-    checks = verify_tor_path(
+    checks = wait_for_tor_path(
         config, authority, require_observation=getattr(args, "require_observation", False)
     )
     return 0 if report(checks) else 1

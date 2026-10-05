@@ -25,6 +25,31 @@ In normal mode, only the Tor daemon receives outbound Internet TCP authority. DH
 `network.env` must not be able to break both the firewall unit and the
 `OnFailure=` lockdown that exists to contain it.
 
+### P2a1. A sustained post-Tor posture failure also revokes authority
+
+`amnesic-pi-posture.service` -- the last gate before the appliance declares
+itself ready -- carries `OnFailure=amnesic-pi-lockdown.service`, the same as
+the firewall and anonymity stages. Without this, a posture that never
+verifies (Tor permanently unreachable, a bridge that never connects, a
+listener that never comes up) left the appliance running indefinitely in an
+"operational but unready" state: not leaking, because the installed policy
+still only permits the Tor-redirected path, but not contained either.
+
+This is safe only because `amnesic-pi-anon verify-tor-path` itself retries
+within a bounded budget (`TOR_WAIT_SECONDS`, default 120s) before returning
+nonzero -- see `torpath.wait_for_tor_path`. Tor's own bootstrap timing is not
+a posture failure, and must not be mistaken for one; only exhausting that
+budget is. The practical minimum time to detect "Tor is genuinely absent" is
+dominated by `verify_tor_path`'s own per-probe timeout (45s), not by
+`TOR_WAIT_SECONDS` alone -- a single attempt cannot return faster than that
+when nothing answers.
+
+Operator consequence: a Tor outage that outlasts the retry budget locks the
+appliance down and requires manual recovery (fix the cause, then
+`systemctl restart amnesic-pi-firewall.service`). This is the same trade
+already made for the firewall unit: connectivity loss beats an appliance
+that stays "almost ready" forever. See `docs/boot-chain.md`.
+
 ### P2a. Forwarding authority is transactional
 
 Forwarding does not exist until `amnesic-pi-firewall apply` has installed the nftables policy and verified it against the live kernel. No boot-time sysctl, and no other unit, can grant it. Every failure path within the transaction runs `lockdown`, which disables forwarding before it touches nftables.

@@ -25,6 +25,7 @@ not appear within `IFACE_WAIT_SECONDS` is a hard failure.
 | `IFACE_WAIT_SECONDS` | `20` | bounded enumeration retry budget |
 | `TOR_PROBE_HOST` / `TOR_PROBE_PORT` | `check.torproject.org` / `443` | SOCKS circuit probe target |
 | `TOR_DNS_PROBE_NAME` | `check.torproject.org` | Tor DNS probe name |
+| `TOR_WAIT_SECONDS` | `120` | bounded retry budget for Tor's own bootstrap timing |
 | `EGRESS_ECHO_HOST` / `EGRESS_ECHO_PATH` | empty / `/` | optional exit-address telemetry |
 
 ## MAC randomization

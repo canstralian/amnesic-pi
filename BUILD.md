@@ -453,6 +453,14 @@ hardware you may promote it:
 sudo amnesic-pi-anon verify-tor-path --require-observation
 ```
 
+As a systemd unit, `amnesic-pi-posture.service` retries this command on its
+own, bounded by `TOR_WAIT_SECONDS` (default 120s), before giving up -- Tor's
+own bootstrap timing is not a posture failure. **Once that budget is
+exhausted, `OnFailure=amnesic-pi-lockdown.service` fires, the same as the
+firewall unit.** A sustained Tor outage after boot locks the appliance down,
+not just marks it unready; recover with `sudo amnesic-pi-firewall apply` once
+the cause is fixed. Keep a local console.
+
 ---
 
 ## 16. Enable the boot sequence

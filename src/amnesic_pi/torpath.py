@@ -28,6 +28,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 import struct
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -327,3 +328,39 @@ def _external_address_check(
         f"observed {observed}, distinct from this appliance's addresses",
         Kind.OBSERVED,
     )
+
+
+def wait_for_tor_path(
+    config: Config,
+    authority: Authority,
+    require_observation: bool = False,
+    probe_timeout: float = 45.0,
+    wait_seconds: float | None = None,
+    poll: float = 3.0,
+    checker: Callable[..., list[PostureCheck]] = verify_tor_path,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> list[PostureCheck]:
+    """Bounded retry around `verify_tor_path`, for Tor's own bootstrap timing.
+
+    The same idea as `NetworkInterfaces.wait_for`: Tor routinely has not
+    finished bootstrapping the instant this unit starts, and that is a timing
+    fact, not a posture failure. Retries the full check until every HARD gate
+    passes or the budget expires, then returns whichever attempt is last --
+    success or not -- so the caller always reports the real, current state.
+
+    This budget is what makes it safe to run `lockdown` from this unit's
+    `OnFailure=`: a transient "Tor isn't ready yet" must not escalate to
+    revoking network authority. A *sustained* failure -- Tor genuinely cannot
+    reach the network, a misconfigured bridge, the listener never comes up --
+    still runs out the clock and fails, and that failure is real.
+    """
+    wait_seconds = config.tor_wait_seconds if wait_seconds is None else wait_seconds
+    deadline = clock() + wait_seconds
+    while True:
+        checks = checker(config, authority, require_observation, probe_timeout)
+        if not any(check.blocking for check in checks):
+            return checks
+        if clock() >= deadline:
+            return checks
+        sleep(poll)

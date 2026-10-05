@@ -34,6 +34,11 @@ This repository treats network policy as a security boundary.
   separate stage with a different threat model.
 - Do not weaken a dependency to accommodate slow USB enumeration. Raise the
   bounded retry budget instead.
+- A sustained post-Tor posture failure runs `OnFailure=amnesic-pi-lockdown.service`,
+  the same as the firewall and anonymity stages. This is only safe because
+  `verify-tor-path` retries within a bounded budget (`TOR_WAIT_SECONDS`) first;
+  Tor's own bootstrap timing must not be mistaken for a posture failure. Raise
+  the budget for a slow bootstrap, never remove the `OnFailure=` instead.
 
 ## When availability and anonymity conflict
 

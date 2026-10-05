@@ -42,6 +42,10 @@ class Config:
     tor_probe_host: str = "check.torproject.org"
     tor_probe_port: int = 443
     tor_dns_probe_name: str = "check.torproject.org"
+    # Bounded wait for Tor's own bootstrap timing (same idea as
+    # iface_wait_seconds, a different dependency). verify-tor-path retries
+    # within this budget before it is treated as a real posture failure.
+    tor_wait_seconds: float = 120.0
     # Observational telemetry only. Empty disables the external echo probe.
     egress_echo_host: str = ""
     egress_echo_path: str = "/"
@@ -77,6 +81,9 @@ class Config:
         if not 0 < self.iface_wait_seconds <= 300:
             raise ConfigError("IFACE_WAIT_SECONDS must be greater than 0 and at most 300")
 
+        if not 0 < self.tor_wait_seconds <= 300:
+            raise ConfigError("TOR_WAIT_SECONDS must be greater than 0 and at most 300")
+
         for label, value in (
             ("TOR_PROBE_HOST", self.tor_probe_host),
             ("TOR_DNS_PROBE_NAME", self.tor_dns_probe_name),
@@ -104,6 +111,7 @@ ALLOWED_KEYS = frozenset(
         "TOR_PROBE_HOST",
         "TOR_PROBE_PORT",
         "TOR_DNS_PROBE_NAME",
+        "TOR_WAIT_SECONDS",
         "EGRESS_ECHO_HOST",
         "EGRESS_ECHO_PATH",
     }
@@ -145,6 +153,7 @@ def load_env(path: Path) -> Config:
             tor_probe_host=values.get("TOR_PROBE_HOST", "check.torproject.org"),
             tor_probe_port=int(values.get("TOR_PROBE_PORT", "443")),
             tor_dns_probe_name=values.get("TOR_DNS_PROBE_NAME", "check.torproject.org"),
+            tor_wait_seconds=float(values.get("TOR_WAIT_SECONDS", "120")),
             egress_echo_host=values.get("EGRESS_ECHO_HOST", ""),
             egress_echo_path=values.get("EGRESS_ECHO_PATH", "/"),
         )

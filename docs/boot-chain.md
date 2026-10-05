@@ -97,6 +97,20 @@ a failure, so `OnFailure=` never fires for it.
 `lockdown` is idempotent and disables forwarding before it touches nftables, so
 running it twice, or after a partial apply, is safe.
 
+`OnFailure=amnesic-pi-lockdown.service` is on `amnesic-pi-anon.service`,
+`amnesic-pi-firewall.service`, **and** `amnesic-pi-posture.service` -- every
+stage before `amnesic-pi-ready.target`, not only the firewall. A posture that
+never verifies is not leaking (the installed policy still only permits the
+Tor-redirected path), but it also should not sit "operational but unready"
+forever; it should become inert like any other failed pre-ready stage.
+
+This is only safe because `amnesic-pi-anon verify-tor-path` retries itself,
+bounded by `TOR_WAIT_SECONDS` (default 120s), before it returns nonzero. Tor's
+own bootstrap timing -- the listener not up yet, no circuit yet -- is not a
+posture failure and must not trip `OnFailure=` on the first look. Only
+exhausting that budget is a real failure. See `torpath.wait_for_tor_path` and
+`THREAT-MODEL.md#p2a1-a-sustained-post-tor-posture-failure-also-revokes-authority`.
+
 ### Lockdown takes no configuration
 
 `amnesic-pi-firewall lockdown` deliberately does not read

@@ -140,8 +140,9 @@ def test_firewall_is_ordered_before_every_network_consumer(graph: unitgraph.Grap
 
 
 def test_failure_paths_reach_lockdown(graph: unitgraph.Graph):
-    for unit in (ANON, FIREWALL):
+    for unit in (ANON, FIREWALL, POSTURE):
         assert LOCKDOWN in graph.on_failure[unit], f"{unit} has no OnFailure lockdown"
+
 
 
 def test_explicit_stop_also_reaches_lockdown(root: Path):
