@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import ast
 import inspect
+import socket
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -22,7 +25,16 @@ from fakes import FakeKernel, FakeNft, FakeNic, FakeSysctl
 from amnesic_pi import torpath
 from amnesic_pi.authority import Authority
 from amnesic_pi.config import Config
-from amnesic_pi.torpath import Kind, PostureCheck, TorPathError, _external_address_check
+from amnesic_pi.torpath import (
+    SOCKS5_ATYP_DOMAIN,
+    SOCKS5_NO_AUTH,
+    SOCKS5_SUCCEEDED,
+    SOCKS5_VERSION,
+    Kind,
+    PostureCheck,
+    TorPathError,
+    _external_address_check,
+)
 
 TEMPLATE = Path("network/policy.nft.in")
 
@@ -293,6 +305,97 @@ def test_no_outer_tunnel_is_introduced():
     source = inspect.getsource(torpath).lower()
     for token in ("openvpn", "wireguard", "vpn", "rotator", "proxychains"):
         assert token not in source, f"torpath references {token!r}, which is out of Stage 1 scope"
+
+
+# -- SOCKS5 reads must tolerate TCP fragmentation --------------------------
+
+
+class _FragmentingSocksServer:
+    """A real TCP server that answers one SOCKS5 CONNECT, deliberately
+    sending its reply split across many small `send()` calls.
+
+    `socket.recv(n)` returning fewer than `n` bytes is routine TCP behaviour,
+    not a Tor malfunction, even on loopback. A server under this test's
+    control is the only way to force it deterministically rather than hope
+    a real Tor instance happens to fragment a reply during the test run.
+    """
+
+    def __init__(
+        self, atyp: int = SOCKS5_ATYP_DOMAIN, bound_field: bytes = b"\x07example\x01\xbb"
+    ) -> None:
+        # bound_field for the domain ATYP: a length-prefixed name, then the
+        # 2-byte bound port every ATYP's reply ends with.
+        self.atyp = atyp
+        self.bound_field = bound_field
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(1)
+        self.port = self.listener.getsockname()[1]
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _send_byte_by_byte(self, conn: socket.socket, data: bytes) -> None:
+        for byte in data:
+            conn.sendall(bytes([byte]))
+            time.sleep(0.001)
+
+    def _serve(self) -> None:
+        conn, _ = self.listener.accept()
+        with conn:
+            conn.recv(3)  # greeting: VER, NMETHODS, METHODS
+            self._send_byte_by_byte(conn, bytes([SOCKS5_VERSION, SOCKS5_NO_AUTH]))
+
+            header = conn.recv(5)  # VER, CMD, RSV, ATYP, length-or-first-octet
+            domain_len = header[4]
+            conn.recv(domain_len + 2)  # rest of the domain name + port
+
+            reply = bytes([SOCKS5_VERSION, SOCKS5_SUCCEEDED, 0x00, self.atyp])
+            reply += self.bound_field
+            self._send_byte_by_byte(conn, reply)
+
+    def close(self) -> None:
+        self.listener.close()
+        self.thread.join(timeout=2)
+
+
+def test_socks_connect_tolerates_a_reply_fragmented_across_many_reads():
+    """A reply split into single-byte TCP segments must still parse correctly."""
+    server = _FragmentingSocksServer()
+    try:
+        sock = torpath.socks_connect("127.0.0.1", server.port, "example.com", 443, timeout=5.0)
+        try:
+            # The server closes right after its reply. If any _recv_exact
+            # call had stopped short, this would read leftover SOCKS trailer
+            # bytes instead of the clean EOF a fully-drained reply leaves.
+            sock.settimeout(2.0)
+            assert sock.recv(1) == b""
+        finally:
+            sock.close()
+    finally:
+        server.close()
+
+
+def test_recv_exact_raises_on_a_short_read_rather_than_returning_a_partial_result():
+    """A connection that closes mid-field must say so, not return short bytes."""
+    a, b = socket.socketpair()
+    try:
+        b.sendall(b"\x05\x00")  # 2 of an expected 4 bytes
+        b.close()
+        with pytest.raises(TorPathError, match=r"connection closed after 2 of 4"):
+            torpath._recv_exact(a, 4)
+    finally:
+        a.close()
+
+
+def test_recv_exact_assembles_a_value_delivered_one_byte_at_a_time():
+    a, b = socket.socketpair()
+    try:
+        for byte in b"\x05\x00\x00\x01":
+            b.sendall(bytes([byte]))
+        assert torpath._recv_exact(a, 4) == b"\x05\x00\x00\x01"
+    finally:
+        a.close()
+        b.close()
 
 
 # -- protocol helpers ------------------------------------------------------

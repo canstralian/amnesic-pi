@@ -73,6 +73,28 @@ def _tcp_probe(host: str, port: int, timeout: float) -> bool:
         return False
 
 
+def _recv_exact(sock: socket.socket, length: int) -> bytes:
+    """Read exactly `length` bytes.
+
+    `socket.recv(n)` may return fewer than `n` bytes even on a healthy
+    connection -- TCP is a byte stream, not a message protocol, and nothing
+    guarantees a SOCKS5 field arrives in a single read. Treating a short read
+    as a protocol violation would misdiagnose routine TCP behaviour as Tor
+    refusing the connection, and leave unread trailer bytes sitting in the
+    socket for whatever the caller does next with it.
+    """
+    chunks: list[bytes] = []
+    remaining = length
+    while remaining > 0:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            got = length - remaining
+            raise TorPathError(f"connection closed after {got} of {length} expected bytes")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def socks_connect(
     socks_host: str,
     socks_port: int,
@@ -90,8 +112,8 @@ def socks_connect(
     try:
         sock.settimeout(timeout)
         sock.sendall(bytes([SOCKS5_VERSION, 1, SOCKS5_NO_AUTH]))
-        greeting = sock.recv(2)
-        if len(greeting) != 2 or greeting[0] != SOCKS5_VERSION or greeting[1] != SOCKS5_NO_AUTH:
+        greeting = _recv_exact(sock, 2)
+        if greeting[0] != SOCKS5_VERSION or greeting[1] != SOCKS5_NO_AUTH:
             raise TorPathError("SOCKS5 greeting was refused by the local Tor listener")
 
         encoded = target_host.encode("idna")
@@ -101,8 +123,8 @@ def socks_connect(
         request += encoded + struct.pack("!H", target_port)
         sock.sendall(request)
 
-        reply = sock.recv(4)
-        if len(reply) != 4 or reply[0] != SOCKS5_VERSION:
+        reply = _recv_exact(sock, 4)
+        if reply[0] != SOCKS5_VERSION:
             raise TorPathError("malformed SOCKS5 reply from the local Tor listener")
         if reply[1] != SOCKS5_SUCCEEDED:
             raise TorPathError(
@@ -112,13 +134,13 @@ def socks_connect(
         # Drain the bound-address field so the socket is positioned at payload.
         atyp = reply[3]
         if atyp == 0x01:
-            sock.recv(4)
+            _recv_exact(sock, 4)
         elif atyp == SOCKS5_ATYP_DOMAIN:
-            length = sock.recv(1)
-            sock.recv(length[0] if length else 0)
+            length = _recv_exact(sock, 1)
+            _recv_exact(sock, length[0])
         elif atyp == 0x04:
-            sock.recv(16)
-        sock.recv(2)
+            _recv_exact(sock, 16)
+        _recv_exact(sock, 2)
         return sock
     except OSError as exc:
         sock.close()
