@@ -458,8 +458,23 @@ own, bounded by `TOR_WAIT_SECONDS` (default 120s), before giving up -- Tor's
 own bootstrap timing is not a posture failure. **Once that budget is
 exhausted, `OnFailure=amnesic-pi-lockdown.service` fires, the same as the
 firewall unit.** A sustained Tor outage after boot locks the appliance down,
-not just marks it unready; recover with `sudo amnesic-pi-firewall apply` once
-the cause is fixed. Keep a local console.
+not just marks it unready.
+
+Recovery is two steps, not one. `amnesic-pi-posture.service` is
+`BindsTo=amnesic-pi-firewall.service`, not the other way round, so
+`amnesic-pi-firewall apply` (or restarting the firewall unit) restores
+forwarding and the policy, but does **not** restart posture -- it is left
+sitting in its last failed state, and the appliance can look authorized again
+while still unverified. Fix the cause, then:
+
+```bash
+sudo amnesic-pi-firewall apply
+sudo systemctl restart amnesic-pi-posture.service
+sudo systemctl is-active amnesic-pi-posture.service
+```
+
+Confirm the third command prints `active`, not just that the second one ran.
+Keep a local console.
 
 ---
 

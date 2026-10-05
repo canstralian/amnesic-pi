@@ -47,10 +47,23 @@ dominated by `verify_tor_path`'s own per-probe timeout (45s), not by
 when nothing answers.
 
 Operator consequence: a Tor outage that outlasts the retry budget locks the
-appliance down and requires manual recovery (fix the cause, then
-`systemctl restart amnesic-pi-firewall.service`). This is the same trade
-already made for the firewall unit: connectivity loss beats an appliance
-that stays "almost ready" forever. See `docs/boot-chain.md`.
+appliance down and requires manual recovery. `amnesic-pi-posture.service` is
+`BindsTo=amnesic-pi-firewall.service`, not the reverse: restarting the
+firewall unit alone restores forwarding and the verified policy, but it does
+not restart posture, and `amnesic-pi-posture.service` stays in its last
+*failed* state -- the appliance can regain authority while still reporting
+unready. Fix the cause, then restart both, and confirm posture actually
+passed rather than assuming it did because forwarding came back:
+
+```bash
+sudo systemctl restart amnesic-pi-firewall.service
+sudo systemctl restart amnesic-pi-posture.service
+sudo systemctl is-active amnesic-pi-posture.service
+```
+
+This is the same trade already made for the firewall unit: connectivity loss
+beats an appliance that stays "almost ready" forever. See
+`docs/boot-chain.md`.
 
 ### P2a. Forwarding authority is transactional
 
