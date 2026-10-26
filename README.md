@@ -232,14 +232,15 @@ sudo nft list table inet amnesic_pi
 ```
 
 `apply` fails closed *once the transaction starts*: if anything in it fails,
-`apply` runs `lockdown` itself, so that nonzero exit already means forwarding
-is off. Two failures exit before the transaction and deliberately change
-nothing -- a non-root invocation, and a malformed config, which exits
-`configuration error: ...` because a parse failure must not flush a known-good
-ruleset. Forwarding is then left as it was, which after an earlier successful
-`apply` means still on. Under systemd the unit's `OnFailure=` closes that
-window; a run by hand has no such handler, so fix the config and re-run
-`apply`, or close the appliance down yourself:
+`apply` runs `lockdown` itself, and the message says whether that containment
+completed (`appliance locked down`) or did not (`lockdown incomplete, posture
+unproven`). Three failures exit *before* the transaction and deliberately change
+nothing -- a non-root invocation, a malformed config (`configuration error:
+...`), and a template that cannot be rendered (`... NOT locked down`) -- because
+a parse failure must not flush a known-good ruleset. Forwarding is then left as
+it was, which after an earlier successful `apply` means still on. Under systemd
+the unit's `OnFailure=` closes that window; a run by hand has no such handler,
+so fix the fault and re-run `apply`, or close the appliance down yourself:
 
 ```bash
 sudo amnesic-pi-firewall lockdown
