@@ -37,8 +37,11 @@ amnesic-pi-firewall.service      topology -> forwarding off -> policy ->
 systemd-networkd.service         (or NetworkManager.service)
         |
         v
-tor@default.service
+tor@default.service              ExecStartPre: forget the cached consensus
         |
+        v
+amnesic-pi-clock.service         clock forward to this boot's consensus
+        |                        (no-op with a battery-backed RTC; not a gate)
         v
 amnesic-pi-posture.service       Tor bootstrap + Tor-path verification
         |
@@ -60,6 +63,12 @@ unsatisfiable by construction.
 
 Phase 2 is `amnesic-pi-anon verify-tor-path`, in `amnesic-pi-posture.service`,
 after Tor.
+
+`amnesic-pi-clock.service` sits between the two Tor-side stages. It `Wants=`
+Tor, not `Requires=`, because it restarts Tor after moving the clock and a
+`Requires=` edge would propagate that restart back onto itself. It carries no
+`OnFailure=`: an uncorrected clock surfaces as a posture failure, and the
+posture unit is the gate that locks down.
 
 ## Forwarding authority
 

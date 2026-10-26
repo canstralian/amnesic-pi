@@ -8,6 +8,7 @@
 #
 # source<TAB>destination (relative to /etc/systemd/system)
 amnesic-pi-anon.service	amnesic-pi-anon.service
+amnesic-pi-clock.service	amnesic-pi-clock.service
 amnesic-pi-firewall.service	amnesic-pi-firewall.service
 amnesic-pi-lockdown.service	amnesic-pi-lockdown.service
 amnesic-pi-posture.service	amnesic-pi-posture.service
