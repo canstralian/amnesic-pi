@@ -1,5 +1,4 @@
-# Bootstrap is intentionally read-only. Generated files are emitted for review,
-# never pushed by a GitHub Actions token.
+# This job is verification-only: no lockfile writes or automatic dependency updates.
 name: Actions Lockfile Verification
 
 on:
@@ -24,24 +23,12 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        uses: actions/checkout@v5.1.0
         with:
           persist-credentials: false
 
-      - name: Install GitHub's pinned lockfile extension
+      - name: Install pinned GitHub Actions lockfile extension
         run: gh extension install github/gh-actions-lock --pin v0.2.0
 
-      - name: Verify lockfile or report first-onboarding output
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -f .github/workflows/actions.lock ]]; then
-            gh actions-lock --verify
-          else
-            echo "::notice::No lockfile exists; generating a review-only bootstrap bundle"
-            gh actions-lock
-            echo "BEGIN_ACTIONS_LOCK_BOOTSTRAP_BUNDLE"
-            tar -czf - .github/workflows | base64 -w0
-            echo
-            echo "END_ACTIONS_LOCK_BOOTSTRAP_BUNDLE"
-          fi
+      - name: Verify lockfile coverage and upstream provenance
+        run: gh actions-lock --verify
