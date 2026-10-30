@@ -1,0 +1,3 @@
+# Explicit human review for CI dependency provenance changes.
+/.github/workflows/actions.lock @canstralian
+/.github/workflows/actions-lock-verify.yml @canstralian
