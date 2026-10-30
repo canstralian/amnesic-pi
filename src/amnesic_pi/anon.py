@@ -4,6 +4,10 @@
 firewall, and therefore long before Tor exists. Nothing in those two paths may
 touch Tor, the network, or persistent state.
 
+`forget-consensus` runs as Tor starts and `sync-clock` just after; together
+they let a Pi with no trusted clock take its time from this boot's consensus
+without any egress beyond Tor's own. See `clock`.
+
 `verify-tor-path` is the opposite end of the boot: it runs after Tor and is the
 last gate before the appliance declares itself ready.
 """
@@ -13,9 +17,11 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from .authority import Authority, Check
 from .clihelp import add_common, authority_for, load_config, report, require_root
+from .clock import TOR_DATA_DIR, forget_consensus, sync_clock
 from .mac import MacError, randomize_interface
 from .netif import InterfaceError, NetworkInterfaces
 from .torpath import wait_for_tor_path
@@ -88,6 +94,27 @@ def cmd_verify_zero_ip(args: argparse.Namespace) -> int:
     return 0 if report(checks) else 1
 
 
+def cmd_forget_consensus(args: argparse.Namespace) -> int:
+    """Drop Tor's cached consensus before Tor starts. Exits nonzero if one stays."""
+    denied = require_root("amnesic-pi-anon forget-consensus")
+    if denied is not None:
+        return denied
+    return 0 if report(forget_consensus(args.data_dir)) else 1
+
+
+def cmd_sync_clock(args: argparse.Namespace) -> int:
+    """Move the clock forward to this boot's consensus if it is behind.
+
+    Not a readiness gate: a clock it could not confirm shows up as a Tor path
+    failure in `verify-tor-path`, which is the gate.
+    """
+    denied = require_root("amnesic-pi-anon sync-clock")
+    if denied is not None:
+        return denied
+    config = load_config(args.config)
+    return 0 if report(sync_clock(args.data_dir, config.tor_wait_seconds)) else 1
+
+
 def cmd_verify_tor_path(args: argparse.Namespace) -> int:
     """Post-Tor posture, with a bounded retry for Tor's own bootstrap timing.
 
@@ -121,6 +148,20 @@ def build_parser() -> argparse.ArgumentParser:
         "verify-zero-ip", help="assert the role interfaces carry no IP before the network starts"
     )
     zero_ip.set_defaults(func=cmd_verify_zero_ip)
+
+    forget = sub.add_parser(
+        "forget-consensus",
+        help="remove Tor's cached consensus so this boot's is fetched fresh (runs before Tor)",
+    )
+    forget.add_argument("--data-dir", type=Path, default=TOR_DATA_DIR)
+    forget.set_defaults(func=cmd_forget_consensus)
+
+    clock = sub.add_parser(
+        "sync-clock",
+        help="move the clock forward to this boot's Tor consensus if it is behind (forward-only)",
+    )
+    clock.add_argument("--data-dir", type=Path, default=TOR_DATA_DIR)
+    clock.set_defaults(func=cmd_sync_clock)
 
     tor_path = sub.add_parser(
         "verify-tor-path",

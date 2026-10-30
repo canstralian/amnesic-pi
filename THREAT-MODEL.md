@@ -65,15 +65,49 @@ This is the same trade already made for the firewall unit: connectivity loss
 beats an appliance that stays "almost ready" forever. See
 `docs/boot-chain.md`.
 
+Containment also comes before cleanup. The permissive policy table is removed
+only once the deny posture is actually installed; if the deny posture fails to
+load, the existing policy is **retained** and the failure is reported. The
+alternative -- removing it anyway -- leaves no table at all, and the kernel's
+own defaults then accept. Forwarding is off on both paths, but forwarding
+governs the `forward` hook only: it says nothing about traffic local processes
+originate, which the `output` hook governs.
+
 ### P2a. Forwarding authority is transactional
 
-Forwarding does not exist until `amnesic-pi-firewall apply` has installed the nftables policy and verified it against the live kernel. No boot-time sysctl, and no other unit, can grant it. Every failure path within the transaction runs `lockdown`, which disables forwarding before it touches nftables.
+Forwarding does not exist until `amnesic-pi-firewall apply` has installed the nftables policy and verified it against the live kernel. No boot-time sysctl, and no other unit, can grant it. Every failure path within the transaction runs `lockdown`, which disables forwarding before it touches nftables. A configuration or template error is refused before the transaction begins, so nothing is torn down and nothing is contained; `apply` reports that state distinctly rather than claiming containment it did not perform.
+
+### P2a1. Egress authority is verified as exclusive, not as present
+
+`verify` accounts for every rule in the `output` chain against a named
+exception, and for every rule in `prerouting` against the two client redirects.
+Finding the Tor grant's terms somewhere in a chain does not establish that Tor
+is the only egress principal: a second, UID-less accept rule leaves every term
+in place while authorizing every local process. Each redirect must likewise
+match as one whole rule, so that the interface, the protocol and the Tor port
+belong to the same rule rather than merely to the same chain.
 
 ### P2b. Link-layer identity is randomized before the network exists
 
 Each role interface receives a locally administered, unicast MAC derived from `os.urandom` before the network manager is allowed to start. The change is verified by reading the address back from the kernel and asserting it is neither the burned-in address nor the pre-change address.
 
 This addresses passive observation of the appliance's link-layer identity on the uplink segment. It does not address an adversary who can correlate the appliance by timing, traffic shape, or any identifier above layer 2.
+
+### P2c. Time comes from Tor, forward-only, with no time egress
+
+Tor will not use a consensus whose validity window does not contain the system clock. A Pi without a battery-backed RTC, booting from a frozen OverlayFS image, starts in the past and would never bootstrap. No NTP principal exists: the Tor UID remains the only egress principal. Instead, `amnesic-pi-clock.service` reads the consensus Tor fetched this boot from Tor's data directory and, if the clock is more than an hour behind its `valid-after`, moves the clock forward to it and restarts Tor.
+
+- **No new network authority.** The clock helper sends nothing. It reads a file.
+- **Forward-only.** A clock ahead of the consensus is reported, never corrected. Moving the clock back would let a replayed, stale consensus look current.
+- **This boot's consensus only.** `forget-consensus` runs as Tor starts and removes the cached consensus, because under OverlayFS the cache and the boot clock are frozen together and would agree while both being stale.
+- **Trust added.** The clock now trusts a consensus document's timestamps before this code checks its signatures. Tor fetched it over TLS from directory caches it authenticates by identity key, but a malicious directory cache could serve a future-dated document. The worst outcome is a clock pushed forward, which makes Tor reject the real consensus: denial of service, not a clearnet path. A battery-backed RTC (Pi 5 J5 connector) removes this path, because the clock is already inside the window and nothing is changed.
+- **Not a gate.** The helper has no `OnFailure=` lockdown. A clock it could not fix leaves Tor unbootstrapped, which the posture gate detects and locks down on.
+
+### P2d. Package updates go through Tor, not around the firewall
+
+Root has no uplink authority, so plain `apt` cannot reach a mirror. Provisioning rewrites every apt source to `tor+https://`, and apt-transport-tor carries those requests over Tor's loopback SOCKS listener. Loopback was already permitted, so the policy is unchanged and no maintenance window opens with the firewall down. The `https` upgrade means an exit relay sees a TLS session to the mirror, not which packages are being fetched. apt still verifies every index against the archive keyring.
+
+A source added later as plain `http://` has no route: it times out rather than leaking. `amnesic-pi apt verify` reports it. Provisioning's first `apt-get install` is the appliance's one clearnet fetch, because it runs before the firewall exists.
 
 ### P3. Ephemeral runtime
 
@@ -96,6 +130,8 @@ Persistent data must live outside the ephemeral root and require an explicit des
 - an unexpected client interface trying ordinary forwarding
 - accidental IPv6 leakage
 - reboot after ordinary runtime writes
+- a boot clock frozen with the image, stalling Tor's bootstrap
+- an update path that needs the firewall lowered
 
 ## Out of scope
 
@@ -112,6 +148,8 @@ Persistent data must live outside the ephemeral root and require an explicit des
 - forensic recovery from RAM while powered
 - out-of-band mutation of the nftables ruleset by root (see below)
 - correlation of the appliance above layer 2 despite MAC randomization
+- a directory cache serving a future-dated consensus to push the clock forward (denial of service only; see P2c)
+- precise time: the consensus-derived clock is accurate to roughly an hour
 
 ## Trust boundaries
 

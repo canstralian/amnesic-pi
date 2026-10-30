@@ -21,7 +21,10 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends tor nftables python3 python3-venv iproute2 ethtool ca-certificates
+# The one clearnet fetch in the appliance's life: the firewall does not exist
+# yet. apt-transport-tor is installed now so every later update goes over Tor.
+apt-get install -y --no-install-recommends tor apt-transport-tor nftables python3 python3-venv \
+  iproute2 ethtool ca-certificates
 
 install -d -m 0755 /opt/amnesic-pi /etc/amnesic-pi /usr/share/amnesic-pi
 cp -a "$repo_root/src" "$repo_root/pyproject.toml" "$repo_root/README.md" /opt/amnesic-pi/
@@ -58,6 +61,10 @@ if [[ -e /etc/tor/torrc && ! -e /etc/tor/torrc.pre-amnesic-pi ]]; then
 fi
 install -m 0644 "$repo_root/config/torrc" /etc/tor/torrc
 
+# From here on apt reaches mirrors only through Tor's loopback SOCKS port; the
+# firewall gives root no other route. Originals: /etc/amnesic-pi/apt-sources.orig/
+/usr/local/bin/amnesic-pi apt torify
+
 # Units are installed from systemd/install-map.tsv, which the systemd
 # dependency tests also read. Keeping one map means a drop-in cannot land on a
 # different unit here than the one CI proved the graph for.
@@ -90,6 +97,7 @@ Then enable, in pipeline order:
   systemctl enable amnesic-pi-anon.service
   systemctl enable amnesic-pi-firewall.service
   systemctl enable tor@default.service
+  systemctl enable amnesic-pi-clock.service
   systemctl enable amnesic-pi-posture.service
   systemctl enable amnesic-pi-ready.target
 

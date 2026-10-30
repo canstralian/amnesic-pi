@@ -16,9 +16,11 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
+from . import aptsources
 from .anon import cmd_randomize_mac, cmd_verify_tor_path, cmd_verify_zero_ip
-from .clihelp import add_common, authority_for, load_config, report
+from .clihelp import add_common, authority_for, load_config, report, require_root
 from .firewall import FirewallError, render_file, tor_uid
 from .fw import cmd_apply, cmd_lockdown, cmd_verify
 from .verify import verify as verify_posture
@@ -46,6 +48,31 @@ def cmd_verify_all(args: argparse.Namespace) -> int:
     """
     config = load_config(args.config)
     return 0 if report(verify_posture(config, authority=authority_for(args))) else 1
+
+
+def cmd_apt_torify(args: argparse.Namespace) -> int:
+    """Route every apt source through Tor. Run once at provisioning."""
+    denied = require_root("amnesic-pi apt torify")
+    if denied is not None:
+        return denied
+    config = load_config(args.config)
+    return 0 if report(aptsources.torify(args.apt_root, config.socks_port)) else 1
+
+
+def cmd_apt_verify(args: argparse.Namespace) -> int:
+    """Read-only: fail if any apt source would bypass Tor."""
+    config = load_config(args.config)
+    return 0 if report(aptsources.verify(args.apt_root, config.socks_port)) else 1
+
+
+def _add_apt_subcommands(sub: argparse._SubParsersAction) -> None:
+    torify = sub.add_parser("torify", help="rewrite every apt source to tor+https (root)")
+    torify.add_argument("--apt-root", type=Path, default=aptsources.APT_ROOT)
+    torify.set_defaults(func=cmd_apt_torify)
+
+    verify_cmd = sub.add_parser("verify", help="fail if any apt source bypasses Tor (read-only)")
+    verify_cmd.add_argument("--apt-root", type=Path, default=aptsources.APT_ROOT)
+    verify_cmd.set_defaults(func=cmd_apt_verify)
 
 
 def _add_firewall_subcommands(sub: argparse._SubParsersAction) -> None:
@@ -96,6 +123,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     anon = sub.add_parser("anon", help="anonymity stages")
     _add_anon_subcommands(anon.add_subparsers(dest="anon_command", required=True))
+
+    apt = sub.add_parser("apt", help="package updates over Tor")
+    _add_apt_subcommands(apt.add_subparsers(dest="apt_command", required=True))
 
     # Retained spellings from before the authority model was split into stages.
     # `apply-firewall` now runs the full transaction, so it is no longer

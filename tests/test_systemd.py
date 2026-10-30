@@ -19,6 +19,7 @@ import pytest
 import unitgraph
 
 ANON = "amnesic-pi-anon.service"
+CLOCK = "amnesic-pi-clock.service"
 FIREWALL = "amnesic-pi-firewall.service"
 LOCKDOWN = "amnesic-pi-lockdown.service"
 POSTURE = "amnesic-pi-posture.service"
@@ -84,7 +85,7 @@ def test_reverse_edges_name_every_bound_consumer(graph: unitgraph.Graph):
     set here means adding a new network consumer without gating it is visible
     as a test failure rather than a silent omission.
     """
-    assert graph.bound_by[FIREWALL] == {NETWORKD, NETWORKMANAGER, TOR, POSTURE}
+    assert graph.bound_by[FIREWALL] == {NETWORKD, NETWORKMANAGER, TOR, CLOCK, POSTURE}
     assert graph.bound_by[ANON] == {FIREWALL}
 
 
@@ -116,6 +117,36 @@ def test_tor_path_verifier_runs_after_tor(graph: unitgraph.Graph, root: Path):
     assert TOR in graph.after[POSTURE]
     assert TOR in graph.requires[POSTURE]
     assert "verify-tor-path" in (root / POSTURE).read_text(encoding="utf-8")
+
+
+def test_clock_is_corrected_after_tor_and_before_the_posture_gate(graph: unitgraph.Graph):
+    """The posture gate must judge the Tor path on the corrected clock."""
+    assert TOR in graph.after[CLOCK]
+    assert POSTURE in graph.before[CLOCK]
+    assert CLOCK in graph.after[POSTURE]
+    assert FIREWALL in graph.binds_to[CLOCK]
+
+
+def test_clock_wants_tor_rather_than_requiring_it(graph: unitgraph.Graph):
+    """The clock unit restarts Tor; a Requires= edge would restart it mid-run."""
+    assert TOR in graph.wants[CLOCK]
+    assert TOR not in graph.requires[CLOCK]
+    assert TOR not in graph.binds_to[CLOCK]
+
+
+def test_clock_is_a_helper_not_an_authority_gate(graph: unitgraph.Graph):
+    """Readiness is decided by the posture gate, not by the clock helper."""
+    assert not graph.on_failure[CLOCK]
+    assert CLOCK not in graph.requires[READY]
+
+
+def test_tor_forgets_the_cached_consensus_before_it_starts(root: Path):
+    """Under OverlayFS the cache and the boot clock are frozen together."""
+    drop_in = (root / "tor@default.service.d" / "10-amnesic-pi.conf").read_text(encoding="utf-8")
+    pre = [line for line in drop_in.splitlines() if line.startswith("ExecStartPre=")]
+    assert pre == ["ExecStartPre=/usr/local/bin/amnesic-pi-anon forget-consensus"], (
+        "a leading '-' would let a stale cache survive silently"
+    )
 
 
 def test_posture_stage_is_still_bound_to_the_firewall(graph: unitgraph.Graph):

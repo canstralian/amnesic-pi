@@ -197,16 +197,17 @@ def test_cmd_apply_does_not_claim_lockdown_when_render_failed(monkeypatch, tmp_p
     """The stderr message must track whether lockdown actually ran.
 
     A render failure (missing/bad template) never touches the kernel, so
-    `authority.apply()` raises an AuthorityError with `locked_down=False`.
+    `authority.apply()` raises an AuthorityError whose containment is
+    "prior policy preserved".
     Printing "appliance locked down" for that path would be false.
     """
-    from amnesic_pi.authority import AuthorityError
+    from amnesic_pi.authority import CONTAINMENT_PRESERVED, AuthorityError
 
     class StubAuthority:
         def apply(self):
-            err = AuthorityError("cannot render the firewall policy: boom")
-            err.locked_down = False
-            raise err
+            raise AuthorityError(
+                "cannot render the firewall policy: boom", containment=CONTAINMENT_PRESERVED
+            )
 
     monkeypatch.setattr(fw, "authority_for", lambda args: StubAuthority())
     monkeypatch.setattr(fw, "require_root", lambda command: None)
@@ -214,5 +215,5 @@ def test_cmd_apply_does_not_claim_lockdown_when_render_failed(monkeypatch, tmp_p
     args = fw.build_parser().parse_args(["--config", str(tmp_path / "unused.env"), "apply"])
     assert fw.cmd_apply(args) == 1
     stderr = capsys.readouterr().err
-    assert "locked down" not in stderr
-    assert "previous state unchanged" in stderr
+    assert "appliance locked down" not in stderr
+    assert "NOT locked down" in stderr

@@ -32,6 +32,9 @@ Recommended Stage 1 setup:
 - one Ethernet cable for the uplink
 - one USB-to-Ethernet adapter for the downstream network
 - keyboard and display for the initial firewall deployment
+- recommended: a Raspberry Pi 5 RTC battery on the J5 connector
+
+The appliance has no NTP: its only egress is Tor. Without an RTC battery, each boot from the OverlayFS image starts at the time the image was frozen. `amnesic-pi-clock.service` then moves the clock forward from the Tor consensus before the posture gate runs (see THREAT-MODEL.md P2c). With a battery the clock is already right and that step does nothing. If you fit a rechargeable cell, enable charging with `dtparam=rtc_bbat_vchg=3000000` in `/boot/firmware/config.txt`.
 
 Topology:
 
@@ -316,19 +319,30 @@ This is a single transaction: it verifies topology, forces every forwarding
 knob to 0, installs the policy, verifies the installed policy against the live
 kernel, and only then grants IPv4 forwarding.
 
-A nonzero exit **from the transaction** means it failed and already ran
-`lockdown`, so forwarding is off and an unconditional deny posture is
-installed.
+Three failures exit nonzero *before* the transaction starts and deliberately
+change nothing: a non-root invocation, a malformed
+`/etc/amnesic-pi/network.env` (which exits `configuration error: ...`), and a
+policy template that cannot be rendered (which exits `... the appliance was NOT
+locked down`). None of them runs `lockdown`, because a parse failure must not
+flush a known-good ruleset. Forwarding is left exactly as it was -- after an
+earlier successful `apply`, that means still enabled. As a systemd unit the
+firewall's `OnFailure=` runs `amnesic-pi-lockdown.service` and closes that
+window. Run by hand there is no such handler: correct the fault and re-run
+`apply`, or close the appliance down yourself with
+`sudo amnesic-pi-firewall lockdown`.
 
-Two failures exit nonzero *before* the transaction starts and deliberately
-change nothing: a non-root invocation, and a malformed
-`/etc/amnesic-pi/network.env`, which exits `configuration error: ...`. Neither
-runs `lockdown`, because a parse failure must not flush a known-good ruleset.
-Forwarding is left exactly as it was -- after an earlier successful `apply`,
-that means still enabled. As a systemd unit the firewall's `OnFailure=` runs
-`amnesic-pi-lockdown.service` and closes that window. Run by hand there is no
-such handler: correct the config and re-run `apply`, or close the appliance
-down yourself with `sudo amnesic-pi-firewall lockdown`.
+Once the transaction has begun touching the kernel, a nonzero exit means it
+failed **and** already ran `lockdown`. The message says how far that containment
+got, because these are not the same state:
+
+| Message contains | What is true |
+| --- | --- |
+| `appliance locked down` | `lockdown` ran and every one of its checks passed: forwarding is off and an unconditional deny posture is installed. |
+| `lockdown incomplete, posture unproven` | The transaction failed **and** the containment did not fully complete. Treat the posture as unproven. Work from a local console. |
+
+A zero exit means the transaction completed **and** the final read-only
+verification of the live posture passed. If that verification fails, the command
+prints the failing checks and exits nonzero rather than reporting success.
 
 Inspect the live table:
 
@@ -421,8 +435,9 @@ PASS  chain output
 PASS  forward chain has no accept
 PASS  client DNS -> Tor DNSPort 5353
 PASS  client TCP -> Tor TransPort 9040
-PASS  output chain bound to the uplink interface
+PASS  no unaccounted prerouting rule
 PASS  Tor UID holds the uplink TCP grant
+PASS  no unaccounted egress grant
 PASS  no unauthorized forward hook
 PASS  no source NAT of downstream traffic
 PASS  IPv4 forwarding
@@ -486,6 +501,7 @@ Only after manual validation succeeds:
 sudo systemctl enable amnesic-pi-anon.service
 sudo systemctl enable amnesic-pi-firewall.service
 sudo systemctl enable tor@default.service
+sudo systemctl enable amnesic-pi-clock.service
 sudo systemctl enable amnesic-pi-posture.service
 sudo systemctl enable amnesic-pi-ready.target
 ```
@@ -497,6 +513,7 @@ systemctl is-enabled \
   amnesic-pi-anon.service \
   amnesic-pi-firewall.service \
   tor@default.service \
+  amnesic-pi-clock.service \
   amnesic-pi-posture.service \
   amnesic-pi-ready.target
 ```
@@ -712,7 +729,7 @@ disable OverlayFS
 reboot writable
         |
         v
-update OS / Tor / Amnesic Pi
+update OS / Tor / Amnesic Pi   (over Tor; the firewall stays up)
         |
         v
 run tests
@@ -729,6 +746,16 @@ run network + amnesia verification
         v
 NORMAL READ-ONLY MODE
 ```
+
+Updates run with the firewall up. Provisioning rewrote every apt source to `tor+https://`, so apt reaches mirrors only through Tor's loopback SOCKS port:
+
+```bash
+sudo amnesic-pi apt verify          # every source is tor+, proxy points at Tor
+sudo apt update
+sudo apt full-upgrade
+```
+
+Do not lower the firewall to update. If `apt update` hangs on one source, it is a source with no Tor route, usually one added after provisioning. `amnesic-pi apt verify` names it, and `sudo amnesic-pi apt torify` rewrites it. The originals are kept under `/etc/amnesic-pi/apt-sources.orig/`.
 
 Kernel, Tor, nftables, NetworkManager/systemd, and OverlayFS updates are security-sensitive because they can invalidate assumptions in the policy boundary.
 
