@@ -1,0 +1,19 @@
+[Unit]
+Description=Amnesic Pi ready (network authority proven, Tor path verified)
+Documentation=file:/usr/share/doc/amnesic-pi/boot-chain.md
+
+# READY is the end of the pipeline, not a synonym for "booted". Every stage
+# below is a hard requirement: if any of them is not active, this target is not
+# reached and the appliance does not claim readiness.
+Requires=amnesic-pi-anon.service
+Requires=amnesic-pi-firewall.service
+Requires=tor@default.service
+Requires=amnesic-pi-posture.service
+
+After=amnesic-pi-anon.service
+After=amnesic-pi-firewall.service
+After=tor@default.service
+After=amnesic-pi-posture.service
+
+[Install]
+WantedBy=multi-user.target

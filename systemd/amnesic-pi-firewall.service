@@ -1,14 +1,52 @@
 [Unit]
-Description=Amnesic Pi fail-closed firewall
+Description=Amnesic Pi fail-closed network authority
+Documentation=file:/usr/share/doc/amnesic-pi/boot-chain.md
 DefaultDependencies=no
 After=local-fs.target
-Before=systemd-sysctl.service network-pre.target tor@default.service tor.service
+
+# BindsTo, not Requires: if the anonymity stage goes away, this unit goes with
+# it, and everything bound to this unit follows. Ordering alone would only say
+# "after", which is not an authority relationship.
+BindsTo=amnesic-pi-anon.service
+After=amnesic-pi-anon.service
+
+# The sysctl baseline sets every forwarding knob to 0. Running after it means
+# the baseline can never overwrite the grant this transaction makes.
+After=systemd-sysctl.service
+
 Wants=network-pre.target
+Before=network-pre.target
+Before=systemd-networkd.service
+Before=NetworkManager.service
+Before=tor@default.service
+Before=tor.service
+
+Conflicts=shutdown.target
+Before=shutdown.target
+
+# OnFailure covers the unit entering a failed state. It does NOT cover an
+# administrator stop, a dependency teardown, or shutdown -- ExecStop covers
+# those. Both are needed; neither is a superset of the other.
+OnFailure=amnesic-pi-lockdown.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/amnesic-pi-firewall
 RemainAfterExit=yes
+EnvironmentFile=-/etc/amnesic-pi/network.env
+
+# apply is itself the transaction: topology -> forwarding off -> policy ->
+# policy verification -> forwarding on -> combined verification. It calls
+# lockdown internally on any failure, so a nonzero exit already means the
+# appliance cannot forward.
+ExecStart=/usr/local/bin/amnesic-pi-firewall apply
+
+# Independent read-only re-verification after apply returns. This is a second
+# pair of eyes on the live kernel state, not part of the transaction.
+ExecStartPost=/usr/local/bin/amnesic-pi-firewall verify
+
+# Every deactivation path that is not a failure: systemctl stop, dependency
+# teardown, shutdown. Lockdown is idempotent and disables forwarding first.
+ExecStop=/usr/local/bin/amnesic-pi-firewall lockdown
 
 [Install]
 WantedBy=sysinit.target

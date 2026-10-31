@@ -14,7 +14,8 @@ the appliance or lock the operator out.
    root, current state of the firewall, whether the overlay is on or off.
 2. **Lockout warnings inline**, at the step that causes them — never at the end.
    Applying default-DROP over SSH is the canonical example; it appears before the
-   `apply-firewall` command, not after.
+   `amnesic-pi-firewall apply` transaction, not after. That command grants
+   forwarding itself; `sysctl --system` afterwards would switch it back off.
 3. **A verification step after every state change.** `nft list table inet amnesic_pi`
    after apply, `amnesic-pi verify` after Tor restart, `check-amnesia.sh verify`
    after reboot.
