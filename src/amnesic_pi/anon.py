@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .authority import Authority, Check
-from .clihelp import add_common, authority_for, dispatch, load_config, report, require_root
+from .clihelp import add_common, dispatch, load_config, report, require_root
 from .clock import TOR_DATA_DIR, forget_consensus, sync_clock
 from .mac import MacError, randomize_interface
 from .netif import InterfaceError, NetworkInterfaces
@@ -130,8 +130,11 @@ def cmd_verify_tor_path(args: argparse.Namespace) -> int:
     here rather than surfacing as a posture failure. See
     `torpath.wait_for_tor_path`.
     """
+    # One config load, shared by the firewall-posture checks and the listener
+    # probes below. Two separate loads could straddle an edit to network.env
+    # and report readiness for a topology no single configuration describes.
     config = load_config(args.config)
-    authority: Authority = authority_for(args)
+    authority = Authority.default(config, template=args.template)
     checks = wait_for_tor_path(
         config, authority, require_observation=getattr(args, "require_observation", False)
     )

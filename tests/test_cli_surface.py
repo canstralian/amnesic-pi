@@ -225,3 +225,44 @@ def test_cmd_apply_does_not_claim_lockdown_when_render_failed(monkeypatch, tmp_p
     stderr = capsys.readouterr().err
     assert "appliance locked down" not in stderr
     assert "NOT locked down" in stderr
+
+
+def test_cmd_verify_tor_path_loads_the_configuration_exactly_once(tmp_path, monkeypatch):
+    """One `network.env` load, shared by the posture checks and the probes.
+
+    `cmd_verify_tor_path` used to load the config once directly and a second
+    time inside `authority_for`. If network.env changed in between, the
+    firewall-posture checks (built from the first load) and the listener
+    probes (the second) could describe two different topologies at once,
+    and the combined report would claim readiness for neither.
+    """
+    env = tmp_path / "network.env"
+    env.write_text("UPLINK_IF=eth0\nCLIENT_IF=eth1\n", encoding="utf-8")
+
+    loaded = []
+    real_load_config = anon.load_config
+
+    def counting_load_config(path):
+        config = real_load_config(path)
+        loaded.append(config)
+        return config
+
+    monkeypatch.setattr(anon, "load_config", counting_load_config)
+
+    captured = {}
+
+    def fake_wait_for_tor_path(config, authority, require_observation=False):
+        captured["config"] = config
+        captured["authority_config"] = authority.config
+        return []
+
+    monkeypatch.setattr(anon, "wait_for_tor_path", fake_wait_for_tor_path)
+
+    args = anon.build_parser().parse_args(
+        ["--config", str(env), "--template", str(TEMPLATE), "verify-tor-path"]
+    )
+    assert anon.cmd_verify_tor_path(args) == 0
+
+    assert len(loaded) == 1, "network.env must be loaded exactly once"
+    assert captured["config"] is loaded[0]
+    assert captured["authority_config"] is loaded[0]
