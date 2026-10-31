@@ -40,6 +40,7 @@ from .sysctl import (
     IPV6_FORWARD_DEFAULT,
     Sysctl,
     SysctlError,
+    ipv6_disable_knob,
 )
 
 DEFAULT_TEMPLATE = Path("/usr/share/amnesic-pi/policy.nft.in")
@@ -310,6 +311,14 @@ class Authority:
                     + "; ".join(f"{c.name}: {c.detail}" for c in failures)
                 )
 
+            # The candidate is proven only now. `_install` left the deny
+            # posture in place underneath it the whole time, so removing it
+            # here -- not any earlier -- is what makes the window between
+            # loading the candidate and verifying it safe: every packet was
+            # dropped by the deny table's lower-priority chains regardless of
+            # what the still-unverified candidate table said.
+            self.nft.delete_table(LOCKDOWN_TABLE_NAME)
+
             # Only now does forwarding authority exist.
             self._grant_forwarding()
 
@@ -351,7 +360,37 @@ class Authority:
         The delete is included only when the table exists so first boot does not
         fail on ENOENT. Unrelated tables are never flushed -- a parse failure
         here must not take down a known-good ruleset someone else installed.
+
+        The deny posture is installed first, *ahead* of the candidate, and
+        deliberately left in place when this returns. `nft -c` only proves the
+        candidate is syntactically valid; it does not prove it is the policy
+        this appliance actually wants enforced -- that is `verify_policy`'s
+        job, which runs after this returns. Without a deny table hooking at
+        priority -300, the candidate's chains would be live and unverified
+        for however long that check takes, and a bug in `render_file` that
+        slips an unaccounted accept rule past `nft -c` would be enforced
+        during exactly that window. With the deny table's chains hooking
+        ahead of the policy table's, every packet is dropped regardless of
+        what the still-unverified candidate contains. `apply` removes the
+        deny table only once `verify_policy` has passed.
         """
+        try:
+            replace_deny = (
+                f"delete table {TABLE_FAMILY} {LOCKDOWN_TABLE_NAME}\n"
+                if self.nft.table_exists(LOCKDOWN_TABLE_NAME)
+                else ""
+            )
+            deny = self.nft.load(replace_deny + LOCKDOWN_RULESET)
+            if deny.returncode != 0:
+                raise AuthorityError(
+                    "cannot install the deny posture ahead of the candidate policy: "
+                    f"{(deny.stderr or '').strip()}"
+                )
+        except (NftError, OSError) as exc:
+            raise AuthorityError(
+                f"cannot install the deny posture ahead of the candidate policy: {exc}"
+            ) from exc
+
         present = self.nft.table_exists(TABLE_NAME)
         transaction = (
             f"delete table {TABLE_FAMILY} {TABLE_NAME}\n" if present else ""
@@ -368,9 +407,8 @@ class Authority:
             raise AuthorityError(
                 f"nftables policy load failed: {(loaded.stderr or '').strip()}"
             )
-        # A successful apply supersedes any prior lockdown posture; leaving the
-        # lockdown table in place would drop the traffic this policy permits.
-        self.nft.delete_table(LOCKDOWN_TABLE_NAME)
+        # The deny posture stays up: removed only by `apply`, once
+        # `verify_policy` has approved this candidate.
 
     def _grant_forwarding(self) -> None:
         try:
@@ -585,9 +623,41 @@ class Authority:
         """Read-only forwarding-state checks."""
         return forwarding_checks(self.sysctl, expect_ipv4)
 
+    def _ipv6_interface_checks(self) -> list[Check]:
+        """Per-role-interface IPv6 disable state, not just the global knobs.
+
+        `net.ipv6.conf.all.disable_ipv6=1` sets every interface's effective
+        state when it is written, but it does not pin it: a later write to
+        `net.ipv6.conf.<iface>.disable_ipv6` re-enables IPv6 on that one
+        interface while `all` stays reporting 1. `forwarding_checks` (shared
+        with the config-free `lockdown`) can only see the global knobs, so
+        this role-interface check lives here, where `self.config` names the
+        two interfaces the invariant actually has to hold for.
+        """
+        checks: list[Check] = []
+        for iface in (self.config.uplink_if, self.config.client_if):
+            knob = ipv6_disable_knob(iface)
+            try:
+                value = self.sysctl.read(knob)
+            except SysctlError as exc:
+                checks.append(Check(f"{iface} IPv6 disabled", False, str(exc)))
+                continue
+            checks.append(
+                Check(
+                    f"{iface} IPv6 disabled",
+                    value in {"1", None},
+                    "absent" if value is None else value,
+                )
+            )
+        return checks
+
     def verify(self, expect_ipv4_forwarding: str = "1") -> list[Check]:
         """Full read-only posture check: policy plus forwarding state."""
-        return self.verify_policy() + self.verify_forwarding(expect_ipv4_forwarding)
+        return (
+            self.verify_policy()
+            + self.verify_forwarding(expect_ipv4_forwarding)
+            + self._ipv6_interface_checks()
+        )
 
     # -- lockdown ----------------------------------------------------------
 

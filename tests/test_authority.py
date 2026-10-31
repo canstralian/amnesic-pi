@@ -23,6 +23,8 @@ from amnesic_pi.authority import (
     Check,
 )
 from amnesic_pi.config import Config
+from amnesic_pi.firewall import render_file
+from amnesic_pi.nft import LOCKDOWN_TABLE_NAME, TABLE_FAMILY, TABLE_NAME
 from amnesic_pi.sysctl import IPV4_FORWARD, IPV6_DISABLE_ALL, IPV6_FORWARD_ALL
 
 TEMPLATE = Path("network/policy.nft.in")
@@ -118,6 +120,31 @@ def test_verify_fails_if_ipv6_is_not_actually_disabled(tmp_path: Path):
     assert any(check.name == IPV6_DISABLE_ALL for check in failed)
 
 
+def test_verify_fails_if_a_role_interface_re_enables_ipv6(tmp_path: Path):
+    """`all.disable_ipv6=1` does not pin every interface's own knob.
+
+    The kernel applies `all.disable_ipv6=1` to every interface at the moment
+    it is written, but a later write to one interface's own
+    `net/ipv6/conf/<iface>/disable_ipv6` re-enables IPv6 there while `all`
+    keeps reporting 1. Checking only the global knobs would let that
+    interface hold an IPv6 address with `verify()` still reporting PASS.
+    """
+    harness = build(tmp_path)
+    harness.authority.apply()
+    assert all(check.ok for check in harness.authority.verify())
+
+    sysctl = harness.authority.sysctl
+    path = sysctl.root / "net/ipv6/conf/eth0/disable_ipv6"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("0\n", encoding="utf-8")
+
+    failed = [check for check in harness.authority.verify() if not check.ok]
+    assert any(check.name == "eth0 IPv6 disabled" for check in failed)
+    # The global knobs are untouched by this -- that is exactly how a single
+    # re-enabled interface used to hide behind them.
+    assert all(check.ok for check in harness.authority.verify() if check.name == IPV6_DISABLE_ALL)
+
+
 @pytest.mark.parametrize(
     "rogue",
     [
@@ -201,6 +228,67 @@ def test_failed_policy_verification_leaves_forwarding_off(tmp_path: Path):
     with pytest.raises(AuthorityError, match="failed verification"):
         harness.authority.apply()
     assert harness.forwarding[IPV4_FORWARD] == "0"
+
+
+def test_install_keeps_the_deny_posture_up_until_verification_passes(tmp_path: Path):
+    """The window `nft -c` cannot close: between install and `verify_policy`.
+
+    `nft -c` proves the candidate is syntactically valid nftables, not that
+    it is the policy this appliance actually wants enforced -- that is what
+    `verify_policy` checks, and it runs only after `_install` returns. If
+    `_install` removed the deny posture before returning, a bug in
+    `render_file` that slipped an unaccounted accept rule past `nft -c`
+    would be live and enforced for however long `verify_policy` took to
+    reject it. `_install` must leave the deny posture up through that whole
+    window, so every packet is dropped regardless of what the
+    still-unverified candidate contains.
+    """
+    harness = build(tmp_path)
+    rendered = render_file(TEMPLATE, harness.authority.config, TOR_UID)
+
+    harness.authority._install(rendered)
+
+    assert f"{TABLE_FAMILY} {LOCKDOWN_TABLE_NAME}" in harness.tables, (
+        "the deny posture was removed before verify_policy had a chance to run"
+    )
+    assert f"{TABLE_FAMILY} {TABLE_NAME}" in harness.tables, "the candidate was never loaded"
+
+
+def test_apply_removes_the_deny_posture_only_after_verification_passes(tmp_path: Path):
+    """A verified apply must not leave the deny posture installed alongside it."""
+    harness = build(tmp_path)
+    harness.authority.apply()
+    assert f"{TABLE_FAMILY} {LOCKDOWN_TABLE_NAME}" not in harness.tables
+
+
+def test_a_candidate_that_fails_verification_still_ends_with_a_verified_deny_posture(
+    tmp_path: Path,
+):
+    """Pairs with the two tests above: the race this fix closes, end to end.
+
+    `_install` always loads the candidate live before `verify_policy` gets to
+    reject it. The point of keeping the deny posture up through that window
+    is that it is already there to fall back on: once `apply`'s own cleanup
+    runs, `lockdown` has nothing left to do but confirm what is already true.
+    """
+    harness = build(tmp_path)
+    original = harness.authority.verify_policy
+
+    def failing_verify() -> list[Check]:
+        return [
+            Check("no unaccounted egress grant", False, 'oifname "eth0" accept')
+            if check.name == "no unaccounted egress grant"
+            else check
+            for check in original()
+        ]
+
+    object.__setattr__(harness.authority, "verify_policy", failing_verify)
+    with pytest.raises(AuthorityError, match="failed verification"):
+        harness.authority.apply()
+
+    assert harness.forwarding[IPV4_FORWARD] == "0"
+    lockdown_checks = harness.authority.lockdown()
+    assert all(check.ok for check in lockdown_checks), lockdown_checks
 
 
 @pytest.mark.parametrize("failure", ["check", "load", "delete"])
