@@ -216,8 +216,12 @@ def nat_postrouting_masquerades(ruleset: str) -> list[str]:
 
 
 # A counter is a statement, not a predicate, and nft renders it with live
-# packet/byte totals. Dropping it keeps rule recognition independent of traffic.
-_COUNTER_RE = re.compile(r"(?<![\w-])counter(\s+packets\s+\d+\s+bytes\s+\d+)?(?![\w-])")
+# packet/byte totals. Dropping it keeps rule recognition independent of
+# traffic. The quoted-string alternative comes first so an interface literally
+# named "counter" (`oifname "counter"`) is matched and preserved whole,
+# instead of having its quoted contents stripped like a real counter
+# statement -- which would corrupt the rule and fail allowlist matching.
+_COUNTER_RE = re.compile(r'"[^"]*"|(?<![\w-])counter(\s+packets\s+\d+\s+bytes\s+\d+)?(?![\w-])')
 
 # An nft-rendered `comment "..."` annotation, likewise not a predicate.
 _RULE_COMMENT_RE = re.compile(r'(?<![\w-])comment\s+"(?:[^"\\]|\\.)*"')
@@ -239,7 +243,9 @@ def chain_rules(body: str) -> list[str]:
     for line in strip_chain_declaration(body).splitlines():
         text = line.split("#", 1)[0]
         text = _RULE_COMMENT_RE.sub(" ", text)
-        text = _COUNTER_RE.sub(" ", text)
+        text = _COUNTER_RE.sub(
+            lambda m: m.group(0) if m.group(0).startswith('"') else " ", text
+        )
         text = " ".join(text.split())
         if text and text not in {"{", "}"}:
             rules.append(text)
