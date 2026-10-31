@@ -26,6 +26,7 @@ namespace regression tests, not here.
 from __future__ import annotations
 
 import ipaddress
+import secrets
 import socket
 import struct
 import time
@@ -54,6 +55,7 @@ class PostureCheck:
     ok: bool
     detail: str
     kind: Kind = Kind.HARD
+    retryable: bool = True
 
     @property
     def blocking(self) -> bool:
@@ -66,6 +68,8 @@ class TorPathError(RuntimeError):
 
 
 def _tcp_probe(host: str, port: int, timeout: float) -> bool:
+    if timeout <= 0:
+        return False
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
@@ -73,7 +77,17 @@ def _tcp_probe(host: str, port: int, timeout: float) -> bool:
         return False
 
 
-def _recv_exact(sock: socket.socket, length: int) -> bytes:
+def _remaining(deadline: float, clock: Callable[[], float] = time.monotonic) -> float:
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise TorPathError("Tor probe deadline exhausted")
+    return remaining
+
+
+def _recv_exact(
+    sock: socket.socket, length: int, *, deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> bytes:
     """Read exactly `length` bytes.
 
     `socket.recv(n)` may return fewer than `n` bytes even on a healthy
@@ -86,6 +100,8 @@ def _recv_exact(sock: socket.socket, length: int) -> bytes:
     chunks: list[bytes] = []
     remaining = length
     while remaining > 0:
+        if deadline is not None:
+            sock.settimeout(_remaining(deadline, clock))
         chunk = sock.recv(remaining)
         if not chunk:
             got = length - remaining
@@ -108,11 +124,12 @@ def socks_connect(
     is also the bootstrap proof. The hostname is passed as a domain rather than
     resolved locally, which keeps name resolution inside Tor.
     """
-    sock = socket.create_connection((socks_host, socks_port), timeout=timeout)
+    deadline = time.monotonic() + timeout
+    sock = socket.create_connection((socks_host, socks_port), timeout=_remaining(deadline))
     try:
-        sock.settimeout(timeout)
+        sock.settimeout(_remaining(deadline))
         sock.sendall(bytes([SOCKS5_VERSION, 1, SOCKS5_NO_AUTH]))
-        greeting = _recv_exact(sock, 2)
+        greeting = _recv_exact(sock, 2, deadline=deadline)
         if greeting[0] != SOCKS5_VERSION or greeting[1] != SOCKS5_NO_AUTH:
             raise TorPathError("SOCKS5 greeting was refused by the local Tor listener")
 
@@ -121,10 +138,11 @@ def socks_connect(
             raise TorPathError("SOCKS5 target hostname is too long")
         request = bytes([SOCKS5_VERSION, SOCKS5_CONNECT, 0x00, SOCKS5_ATYP_DOMAIN, len(encoded)])
         request += encoded + struct.pack("!H", target_port)
+        sock.settimeout(_remaining(deadline))
         sock.sendall(request)
 
-        reply = _recv_exact(sock, 4)
-        if reply[0] != SOCKS5_VERSION:
+        reply = _recv_exact(sock, 4, deadline=deadline)
+        if reply[0] != SOCKS5_VERSION or reply[2] != 0:
             raise TorPathError("malformed SOCKS5 reply from the local Tor listener")
         if reply[1] != SOCKS5_SUCCEEDED:
             raise TorPathError(
@@ -134,18 +152,22 @@ def socks_connect(
         # Drain the bound-address field so the socket is positioned at payload.
         atyp = reply[3]
         if atyp == 0x01:
-            _recv_exact(sock, 4)
+            _recv_exact(sock, 4, deadline=deadline)
         elif atyp == SOCKS5_ATYP_DOMAIN:
-            length = _recv_exact(sock, 1)
-            _recv_exact(sock, length[0])
+            length = _recv_exact(sock, 1, deadline=deadline)
+            if not length[0]:
+                raise TorPathError("SOCKS5 reply has an empty bound hostname")
+            _recv_exact(sock, length[0], deadline=deadline)
         elif atyp == 0x04:
-            _recv_exact(sock, 16)
-        _recv_exact(sock, 2)
+            _recv_exact(sock, 16, deadline=deadline)
+        else:
+            raise TorPathError(f"SOCKS5 reply has an unsupported address type {atyp}")
+        _recv_exact(sock, 2, deadline=deadline)
         return sock
     except OSError as exc:
         sock.close()
         raise TorPathError(f"SOCKS5 negotiation failed: {exc}") from exc
-    except TorPathError:
+    except BaseException:
         sock.close()
         raise
 
@@ -159,10 +181,16 @@ def build_dns_query(name: str, transaction_id: int = 0x1337) -> bytes:
     return header + question + b"\x00" + struct.pack("!HH", 1, 1)
 
 
-def dns_answer_count(response: bytes) -> int:
+def dns_answer_count(response: bytes, transaction_id: int | None = None) -> int:
     if len(response) < 12:
         raise TorPathError("DNS response is truncated")
-    flags, _, ancount = struct.unpack("!HHH", response[2:8])
+    response_id, flags, questions, ancount = struct.unpack("!HHHH", response[:8])
+    if transaction_id is not None and response_id != transaction_id:
+        raise TorPathError("DNS response has a mismatched transaction ID")
+    if not flags & 0x8000 or flags & 0x7800 or questions != 1:
+        raise TorPathError("DNS response has an invalid response header")
+    if flags & 0x0200:
+        raise TorPathError("DNS response is truncated")
     rcode = flags & 0x0F
     if rcode != 0:
         raise TorPathError(f"DNS response carried rcode {rcode}")
@@ -170,16 +198,21 @@ def dns_answer_count(response: bytes) -> int:
 
 
 def resolve_via_tor_dns(name: str, port: int, host: str = "127.0.0.1", timeout: float = 20.0) -> int:
+    if timeout <= 0:
+        raise TorPathError("Tor probe deadline exhausted")
+    transaction_id = secrets.randbits(16)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.settimeout(timeout)
-        sock.sendto(build_dns_query(name), (host, port))
-        response, _ = sock.recvfrom(4096)
+        # Connected UDP accepts replies only from the configured local listener.
+        sock.connect((host, port))
+        sock.send(build_dns_query(name, transaction_id))
+        response = sock.recv(4096)
     except OSError as exc:
         raise TorPathError(f"Tor DNSPort query failed: {exc}") from exc
     finally:
         sock.close()
-    return dns_answer_count(response)
+    return dns_answer_count(response, transaction_id)
 
 
 def local_addresses(config: Config, authority: Authority) -> set[str]:
@@ -207,7 +240,10 @@ def observe_external_address(
     """Fetch the exit-observed address through Tor. Telemetry, not a gate."""
     if not config.egress_echo_host:
         return None
-    sock = connect("127.0.0.1", config.socks_port, config.egress_echo_host, 80, timeout)
+    deadline = time.monotonic() + timeout
+    sock = connect(
+        "127.0.0.1", config.socks_port, config.egress_echo_host, 80, _remaining(deadline)
+    )
     try:
         request = (
             f"GET {config.egress_echo_path} HTTP/1.1\r\n"
@@ -215,9 +251,11 @@ def observe_external_address(
             "Connection: close\r\n"
             "User-Agent: amnesic-pi\r\n\r\n"
         ).encode("ascii")
+        sock.settimeout(_remaining(deadline))
         sock.sendall(request)
         chunks: list[bytes] = []
         while len(b"".join(chunks)) < 8192:
+            sock.settimeout(_remaining(deadline))
             chunk = sock.recv(4096)
             if not chunk:
                 break
@@ -245,14 +283,25 @@ def verify_tor_path(
     # The firewall posture is re-proven here rather than assumed: this unit is
     # the last gate before the appliance declares itself ready.
     for check in authority.verify():
-        checks.append(PostureCheck(f"firewall: {check.name}", check.ok, check.detail))
+        checks.append(PostureCheck(
+            f"firewall: {check.name}", check.ok, check.detail, retryable=False,
+        ))
+    if any(check.blocking for check in checks):
+        return checks
 
-    trans_ok = _tcp_probe("127.0.0.1", config.trans_port, timeout=5.0)
+    # Share the attempt's time budget across probes; repeated short reads and
+    # optional telemetry must not extend a shutdown indefinitely.
+    deadline = time.monotonic() + timeout
+
+    def remaining() -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    trans_ok = _tcp_probe("127.0.0.1", config.trans_port, timeout=min(5.0, remaining()))
     checks.append(
         PostureCheck("Tor TransPort listener", trans_ok, f"127.0.0.1:{config.trans_port}")
     )
 
-    socks_ok = _tcp_probe("127.0.0.1", config.socks_port, timeout=5.0)
+    socks_ok = _tcp_probe("127.0.0.1", config.socks_port, timeout=min(5.0, remaining()))
     checks.append(PostureCheck("Tor SocksPort listener", socks_ok, f"127.0.0.1:{config.socks_port}"))
 
     # A completed SOCKS CONNECT is the bootstrap proof: Tor will not answer one
@@ -264,7 +313,7 @@ def verify_tor_path(
                 config.socks_port,
                 config.tor_probe_host,
                 config.tor_probe_port,
-                timeout,
+                remaining(),
             )
             sock.close()
             checks.append(
@@ -286,7 +335,9 @@ def verify_tor_path(
         )
 
     try:
-        answers = resolve_via_tor_dns(config.tor_dns_probe_name, config.dns_port, timeout=timeout)
+        answers = resolve_via_tor_dns(
+            config.tor_dns_probe_name, config.dns_port, timeout=remaining()
+        )
         checks.append(
             PostureCheck(
                 "Tor DNSPort resolves",
@@ -297,7 +348,7 @@ def verify_tor_path(
     except TorPathError as exc:
         checks.append(PostureCheck("Tor DNSPort resolves", False, str(exc)))
 
-    checks.append(_external_address_check(config, authority, require_observation, timeout))
+    checks.append(_external_address_check(config, authority, require_observation, remaining()))
     return checks
 
 
@@ -343,6 +394,7 @@ def _external_address_check(
             False,
             f"observed {observed}, which is an address of this appliance: clearnet leak",
             Kind.HARD,
+            retryable=False,
         )
     return PostureCheck(
         "external address observed via Tor",
@@ -380,9 +432,15 @@ def wait_for_tor_path(
     wait_seconds = config.tor_wait_seconds if wait_seconds is None else wait_seconds
     deadline = clock() + wait_seconds
     while True:
-        checks = checker(config, authority, require_observation, probe_timeout)
+        remaining = max(0.0, deadline - clock())
+        checks = checker(config, authority, require_observation, min(probe_timeout, remaining))
         if not any(check.blocking for check in checks):
             return checks
+        if any(check.blocking and not check.retryable for check in checks):
+            return checks
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return checks
+        sleep(min(poll, remaining))
         if clock() >= deadline:
             return checks
-        sleep(poll)

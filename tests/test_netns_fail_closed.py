@@ -136,6 +136,25 @@ def test_verify_passes_against_the_live_kernel(topology: netns.Topology, tmp_pat
     assert verify.returncode == 0, verify.stdout + verify.stderr
 
 
+@pytest.mark.parametrize("rule", ["jump relay", "goto relay", "meta l4proto vmap { udp : jump relay }"])
+def test_indirect_forwarding_template_is_rejected_and_contained(
+    topology: netns.Topology, tmp_path: Path, rule: str
+):
+    candidate = tmp_path / "indirect.nft.in"
+    template = TEMPLATE.read_text().replace(
+        "type filter hook forward priority filter; policy drop;",
+        f"type filter hook forward priority filter; policy drop;\n        {rule}",
+    ).replace("    chain output {", "    chain relay {\n        accept\n    }\n\n    chain output {")
+    candidate.write_text(template)
+
+    applied = firewall(topology, write_env(tmp_path, topology), "apply", template=candidate)
+
+    assert applied.returncode != 0, "an indirect forwarding grant passed admission"
+    assert "unaccounted forwarding rule" in applied.stderr
+    assert gateway_forwarding(topology) == "0"
+    assert_no_clearnet(topology, "after refusing an indirect forwarding grant")
+
+
 # -- failure injection -----------------------------------------------------
 
 

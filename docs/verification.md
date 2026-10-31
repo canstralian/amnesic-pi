@@ -137,6 +137,22 @@ systemd-sysctl does at boot, instead of assuming an ambient default. Tests that
 assert "forwarding is off" would otherwise be measuring the host rather than
 the appliance, and would pass or fail depending on where CI ran.
 
+## Additional cancellation and edge-case coverage
+
+`tests/test_anonymity_guards.py` exercises indirect forwarding grants,
+unreadable IPv6 state, exceptions/cancellation immediately after a forwarding
+grant, failed final rechecks, entropy failure, partial MAC success, loopback
+rejection, bounded kernel commands, probe deadlines and signal-handler cleanup.
+The read-only command contract is checked separately from mutating activation.
+`tests/test_torpath.py` also rejects malformed SOCKS fields and invalid DNS
+response headers or transaction IDs.
+
+The namespace suite includes `jump`, `goto` and verdict-map templates that
+must fail admission, revoke forwarding and deliver zero client packets at the
+uplink. These cases require a fresh successful namespace run on the candidate;
+earlier green CI on its parent does not validate them. Unit/fake-kernel results
+do not close this gate.
+
 ## Hardware adversarial checks
 
 Before a release, use a downstream test client and prove:

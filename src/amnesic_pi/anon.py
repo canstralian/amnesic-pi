@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .authority import Authority, Check
-from .clihelp import add_common, authority_for, load_config, report, require_root
+from .clihelp import add_common, authority_for, dispatch, load_config, report, require_root
 from .clock import TOR_DATA_DIR, forget_consensus, sync_clock
 from .mac import MacError, randomize_interface
 from .netif import InterfaceError, NetworkInterfaces
@@ -42,26 +42,33 @@ def cmd_randomize_mac(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     interfaces = NetworkInterfaces.default()
     failures: list[str] = []
-    for iface in config.resolved_mac_ifaces():
-        try:
-            result = randomize_interface(
-                iface, interfaces, wait_seconds=config.iface_wait_seconds
-            )
-        except MacError as exc:
-            failures.append(str(exc))
-            print(f"FAIL  {iface}  {exc}", file=sys.stderr)
-            continue
-        permanent = result.permanent or "unavailable from this driver"
-        print(f"PASS  {iface}  assigned {result.assigned} (burned-in: {permanent})")
+    completed = False
+    try:
+        for iface in config.resolved_mac_ifaces():
+            try:
+                result = randomize_interface(
+                    iface, interfaces, wait_seconds=config.iface_wait_seconds
+                )
+            except MacError as exc:
+                failures.append(str(exc))
+                print(f"FAIL  {iface}  {exc}", file=sys.stderr)
+                continue
+            permanent = result.permanent or "unavailable from this driver"
+            print(f"PASS  {iface}  assigned {result.assigned} (burned-in: {permanent})")
 
-    if failures:
-        print(
-            f"MAC randomization failed on {len(failures)} interface(s); "
-            "refusing to continue to the firewall stage",
-            file=sys.stderr,
-        )
-        return 1
-    return 0
+        if failures:
+            print(
+                f"MAC randomization failed on {len(failures)} interface(s); "
+                "refusing to continue to the firewall stage",
+                file=sys.stderr,
+            )
+            return 1
+        completed = True
+        return 0
+    finally:
+        if not completed:
+            for iface in config.resolved_mac_ifaces():
+                interfaces.force_down(iface)
 
 
 def cmd_verify_zero_ip(args: argparse.Namespace) -> int:
@@ -178,7 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    return dispatch(args, contain_on_interrupt=args.func is cmd_randomize_mac)
 
 
 if __name__ == "__main__":

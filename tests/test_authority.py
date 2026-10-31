@@ -815,17 +815,25 @@ def test_apply_cli_exits_nonzero_when_the_final_verification_fails(
     """The final `report(verify())` result must reach the exit code."""
 
     class Mismatched:
+        contained = False
+
         def apply(self) -> None:
             return None
 
         def verify(self):
             return [Check("post-grant posture", False, "injected mismatch")]
 
-    code, out, err = cli_apply(monkeypatch, Mismatched(), capsys)
+        def lockdown(self):
+            self.contained = True
+            return [Check("deny posture installed", True, "installed")]
+
+    authority = Mismatched()
+    code, out, err = cli_apply(monkeypatch, authority, capsys)
 
     assert "FAIL" in out
     assert code == 1, "the CLI printed FAIL and reported success"
     assert "failed verification" in err
+    assert authority.contained
 
 
 def test_apply_cli_exits_zero_on_a_verified_apply(tmp_path: Path, monkeypatch, capsys):

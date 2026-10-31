@@ -39,12 +39,12 @@ still only permits the Tor-redirected path, but not contained either.
 
 This is safe only because `amnesic-pi-anon verify-tor-path` itself retries
 within a bounded budget (`TOR_WAIT_SECONDS`, default 120s) before returning
-nonzero -- see `torpath.wait_for_tor_path`. Tor's own bootstrap timing is not
-a posture failure, and must not be mistaken for one; only exhausting that
-budget is. The practical minimum time to detect "Tor is genuinely absent" is
-dominated by `verify_tor_path`'s own per-probe timeout (45s), not by
-`TOR_WAIT_SECONDS` alone -- a single attempt cannot return faster than that
-when nothing answers.
+nonzero -- see `torpath.wait_for_tor_path`. Listener, circuit and DNS startup
+failures may retry. A failed firewall check or a positive leak signal is
+terminal and returns immediately to systemd's containment path. Network probes
+share an attempt budget (at most 45s), clamped to the remaining retry budget;
+partial SOCKS reads and echo responses cannot renew that deadline. Kernel
+commands have a separate 10s timeout, so this is not a hard real-time guarantee.
 
 Operator consequence: a Tor outage that outlasts the retry budget locks the
 appliance down and requires manual recovery. `amnesic-pi-posture.service` is
@@ -87,9 +87,34 @@ in place while authorizing every local process. Each redirect must likewise
 match as one whole rule, so that the interface, the protocol and the Tor port
 belong to the same rule rather than merely to the same chain.
 
+The forward chain must remain empty with a DROP default. A literal search for
+`accept` is insufficient: `jump`, `goto` or a verdict map can delegate to a
+regular chain that accepts. No forwarding control flow is admitted in Stage 1.
+
+### P2a2. Interrupted activation revokes authority
+
+Once the apply transaction begins, unexpected errors and cancellation run
+configuration-free lockdown before returning. A failed or unreadable final CLI
+recheck also revokes forwarding. SIGINT/SIGTERM during a mutating CLI command
+attempt containment and return 130/143 respectively; cleanup temporarily ignores
+repeated termination requests. Verification commands remain read-only, including
+on interruption; their systemd `OnFailure=` relationship owns containment.
+
+Failed cleanup is reported as unproven, never as successful lockdown. SIGKILL,
+power loss, kernel failure and out-of-band policy mutation are not covered by
+Python signal handling. There is no automatic clearnet recovery or retry that
+regrants authority after containment; recovery remains an operator action.
+
 ### P2b. Link-layer identity is randomized before the network exists
 
 Each role interface receives a locally administered, unicast MAC derived from `os.urandom` before the network manager is allowed to start. The change is verified by reading the address back from the kernel and asserting it is neither the burned-in address nor the pre-change address.
+
+Readback succeeds while the link is down before it is raised, and is repeated
+afterward. Entropy failure never falls back to a predictable address. If any
+interface fails or the stage is cancelled, link-down is attempted for every
+configured interface, including earlier successes. Loopback is rejected as
+either a network role or a randomization target. Drivers can still refuse a
+link-down request; forwarding/firewall containment remains a separate boundary.
 
 This addresses passive observation of the appliance's link-layer identity on the uplink segment. It does not address an adversary who can correlate the appliance by timing, traffic shape, or any identifier above layer 2.
 

@@ -43,7 +43,10 @@ def generate_mac(
     """
     blocked = {normalize_mac(value) for value in prohibited}
     for _ in range(_MAX_GENERATION_ATTEMPTS):
-        raw = bytearray(entropy(6))
+        try:
+            raw = bytearray(entropy(6))
+        except OSError as exc:
+            raise MacError(f"cryptographic entropy unavailable: {exc}") from exc
         if len(raw) != 6:
             raise MacError("entropy source returned the wrong number of bytes")
         raw[0] |= LOCALLY_ADMINISTERED_BIT
@@ -82,9 +85,8 @@ def randomize_interface(
 ) -> MacResult:
     """Randomize `iface`'s MAC and prove the change took effect.
 
-    Sequence: bounded discovery, capture prohibited addresses, link down, set,
-    link up, read back, assert the readback equals what we generated and is not
-    a prohibited address.
+    Verify the change while the link is down, then raise it and verify again.
+    An ignored change must never briefly activate a burned-in address.
 
     A driver that silently ignores `ip link set address` -- common with cheap
     USB-Ethernet parts -- fails here rather than letting the appliance claim an
@@ -96,48 +98,31 @@ def randomize_interface(
         raise MacError(str(exc)) from exc
 
     try:
-        previous = interfaces.read_mac(iface)
-    except InterfaceError as exc:
-        raise MacError(f"{iface}: cannot read the current MAC: {exc}") from exc
-
-    permanent = interfaces.permanent_mac(iface)
-
-    # The burned-in address is prohibited explicitly. The pre-change address is
-    # prohibited too, but it is not a substitute: a driver may already be
-    # carrying a randomized address while still refusing further changes.
-    prohibited = {previous}
-    if permanent is not None:
-        prohibited.add(normalize_mac(permanent))
-
-    generated = generate_mac(entropy=entropy, prohibited=prohibited)
-
-    try:
         interfaces.link_down(iface)
+        previous = interfaces.read_mac(iface)
+        permanent = interfaces.permanent_mac(iface)
+        prohibited = {previous}
+        if permanent is not None:
+            prohibited.add(normalize_mac(permanent))
+        generated = generate_mac(entropy=entropy, prohibited=prohibited)
         interfaces.set_mac(iface, generated)
+        actual = interfaces.read_mac(iface)
+        if actual != generated:
+            raise MacError(
+                f"{iface}: MAC readback mismatch: kernel reports {actual}, expected {generated}"
+            )
+        if actual in prohibited:
+            raise MacError(f"{iface}: MAC readback returned a prohibited address {actual}")
+        if not is_locally_administered(actual) or not is_unicast(actual):
+            raise MacError(f"{iface}: applied MAC is not locally administered unicast")
         interfaces.link_up(iface)
+        if interfaces.read_mac(iface) != generated:
+            raise MacError(f"{iface}: MAC readback changed when the link was raised")
     except InterfaceError as exc:
         interfaces.force_down(iface)
         raise MacError(f"{iface}: MAC change was rejected: {exc}") from exc
-
-    try:
-        actual = interfaces.read_mac(iface)
-    except InterfaceError as exc:
+    except BaseException:
         interfaces.force_down(iface)
-        raise MacError(f"{iface}: cannot read back the MAC after the change: {exc}") from exc
-
-    if actual != generated:
-        interfaces.force_down(iface)
-        raise MacError(
-            f"{iface}: MAC readback mismatch: kernel reports {actual}, expected {generated}"
-        )
-    if actual in prohibited:
-        interfaces.force_down(iface)
-        raise MacError(
-            f"{iface}: MAC readback returned a prohibited address {actual} "
-            "(the driver appears to ignore address changes)"
-        )
-    if not is_locally_administered(actual) or not is_unicast(actual):
-        interfaces.force_down(iface)
-        raise MacError(f"{iface}: applied MAC {actual} is not a locally administered unicast address")
+        raise
 
     return MacResult(iface=iface, previous=previous, permanent=permanent, assigned=actual)

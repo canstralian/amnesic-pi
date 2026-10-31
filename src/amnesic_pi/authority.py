@@ -30,8 +30,8 @@ from .nft import (
     forward_hooks,
     nat_postrouting_masquerades,
     parse_chains,
-    strip_chain_declaration,
 )
+from .shutdown import shutdown_signals
 from .sysctl import (
     IPV4_FORWARD,
     IPV6_DISABLE_ALL,
@@ -155,7 +155,7 @@ def lockdown(nft: Nft, sysctl: Sysctl) -> list[Check]:
         result = nft.load(replace + LOCKDOWN_RULESET)
         installed = result.returncode == 0
         detail = "deny posture installed" if installed else (result.stderr or "").strip()
-    except NftError as exc:
+    except (NftError, OSError) as exc:
         installed, detail = False, str(exc)
     checks.append(Check("deny posture installed", installed, detail))
 
@@ -179,7 +179,7 @@ def lockdown(nft: Nft, sysctl: Sysctl) -> list[Check]:
         try:
             nft.delete_table(TABLE_NAME)
             removed, removed_detail = True, f"{TABLE_NAME} removed"
-        except NftError as exc:
+        except (NftError, OSError) as exc:
             removed, removed_detail = False, str(exc)
         checks.append(Check("policy table removed", removed, removed_detail))
 
@@ -219,7 +219,11 @@ def forwarding_checks(sysctl: Sysctl, expect_ipv4: str = "1") -> list[Check]:
         # egress path forwarding governs. `config/99-amnesic-pi.conf` sets
         # both of these to 1 ("Stage 1 deliberately has no IPv6 authority
         # path"); this confirms that baseline still holds on the live kernel.
-        value = sysctl.read(knob)
+        try:
+            value = sysctl.read(knob)
+        except SysctlError as exc:
+            checks.append(Check(knob, False, str(exc)))
+            continue
         checks.append(Check(knob, value in {"1", None}, "absent" if value is None else value))
     return checks
 
@@ -315,8 +319,15 @@ class Authority:
                     "post-grant verification failed: "
                     + "; ".join(f"{c.name}: {c.detail}" for c in failures)
                 )
-        except (AuthorityError, NftError, SysctlError, InterfaceError) as exc:
-            cleanup = self.lockdown()
+        except (Exception, KeyboardInterrupt, SystemExit) as exc:
+            # Once the transaction starts, even an unexpected OS error or
+            # cancellation must revoke a grant already made. Preserve the
+            # cancellation after cleanup so CLI exit semantics remain truthful.
+            with shutdown_signals(ignore=True):
+                try:
+                    cleanup = self.lockdown()
+                except Exception as cleanup_exc:
+                    cleanup = [Check("lockdown completed", False, str(cleanup_exc))]
             unmet = [check for check in cleanup if not check.ok]
             message = str(exc)
             if unmet:
@@ -325,6 +336,10 @@ class Authority:
                 message += " [lockdown incomplete: " + "; ".join(
                     f"{c.name}: {c.detail}" for c in unmet
                 ) + "]"
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                if unmet:
+                    exc.add_note(message)
+                raise
             raise AuthorityError(
                 message,
                 containment=CONTAINMENT_INCOMPLETE if unmet else CONTAINMENT_LOCKED_DOWN,
@@ -403,16 +418,17 @@ class Authority:
                 )
             )
 
-        # The forward chain must carry no accept verdict at all. Stage 1 is a
-        # transparent proxy: downstream traffic is redirected, never routed.
+        # Stage 1 never routes clients. Checking for a literal accept misses
+        # jump/goto/verdict-map paths into a regular chain that accepts. Require
+        # the shipped empty chain, after removing non-predicate annotations.
         try:
-            forward = strip_chain_declaration(chain_body(listing, "forward"))
-            has_accept = "accept" in forward
+            forward_rules = chain_rules(chain_body(listing, "forward"))
             checks.append(
                 Check(
                     "forward chain has no accept",
-                    not has_accept,
-                    "no accept verdict" if not has_accept else "accept verdict present",
+                    not forward_rules,
+                    "empty default-drop chain" if not forward_rules else
+                    "unaccounted forwarding rule: " + "; ".join(forward_rules),
                 )
             )
         except NftError as exc:

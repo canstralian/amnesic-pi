@@ -180,17 +180,25 @@ def test_cmd_apply_fails_when_its_own_post_apply_recheck_fails(monkeypatch, tmp_
     from amnesic_pi.authority import Check
 
     class StubAuthority:
+        contained = False
+
         def apply(self):
             return None
 
         def verify(self):
             return [Check("nft table", False, "mismatch after apply")]
 
-    monkeypatch.setattr(fw, "authority_for", lambda args: StubAuthority())
+        def lockdown(self):
+            self.contained = True
+            return [Check("deny posture installed", True, "installed")]
+
+    authority = StubAuthority()
+    monkeypatch.setattr(fw, "authority_for", lambda args: authority)
     monkeypatch.setattr(fw, "require_root", lambda command: None)
 
     args = fw.build_parser().parse_args(["--config", str(tmp_path / "unused.env"), "apply"])
     assert fw.cmd_apply(args) == 1
+    assert authority.contained
 
 
 def test_cmd_apply_does_not_claim_lockdown_when_render_failed(monkeypatch, tmp_path, capsys):

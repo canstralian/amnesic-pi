@@ -127,6 +127,7 @@ def test_telemetry_is_disabled_by_default(tmp_path: Path):
 def test_verify_tor_path_reports_hard_failures_when_tor_is_absent(tmp_path: Path):
     """With no Tor listening, the hard gates fail and readiness is withheld."""
     authority = build_authority(tmp_path)
+    authority.apply()
     checks = torpath.verify_tor_path(
         Config("eth0", "eth1", trans_port=1, socks_port=2, dns_port=3),
         authority,
@@ -233,8 +234,9 @@ def test_wait_for_tor_path_exhausts_the_budget_and_returns_the_last_failure(tmp_
 
     assert result == failing
     assert any(check.blocking for check in result)
-    # t=0 (fail, sleep->3), t=3 (fail, sleep->6), t=6 (deadline 5 already passed): 3 calls.
-    assert len(checker.calls) == 3
+    # No new attempt starts once the budget expires; the last sleep is clamped.
+    assert clock.now == 5.0
+    assert len(checker.calls) == 2
 
 
 def test_wait_for_tor_path_defaults_its_budget_to_the_configured_value(tmp_path: Path):
@@ -253,9 +255,8 @@ def test_wait_for_tor_path_defaults_its_budget_to_the_configured_value(tmp_path:
         poll=7.0,
     )
 
-    # t=0 (fail, sleep->7), t=7 (deadline 7 reached): 2 calls. A hardcoded
-    # function-level default would not produce this number.
-    assert len(checker.calls) == 2
+    assert clock.now == 7.0
+    assert len(checker.calls) == 1
 
 
 # -- exit-IP rotation is not an invariant ----------------------------------
@@ -375,6 +376,16 @@ def test_socks_connect_tolerates_a_reply_fragmented_across_many_reads():
         server.close()
 
 
+@pytest.mark.parametrize("atyp,bound_field", [(0xFF, b"\x00\x00"), (0x03, b"\x00\x00\x00")])
+def test_malformed_socks_bound_address_never_proves_readiness(atyp, bound_field):
+    server = _FragmentingSocksServer(atyp, bound_field)
+    try:
+        with pytest.raises(TorPathError, match="unsupported address type|empty bound hostname"):
+            torpath.socks_connect("127.0.0.1", server.port, "example.com", 443, timeout=2.0)
+    finally:
+        server.close()
+
+
 def test_recv_exact_raises_on_a_short_read_rather_than_returning_a_partial_result():
     """A connection that closes mid-field must say so, not return short bytes."""
     a, b = socket.socketpair()
@@ -418,6 +429,49 @@ def test_dns_rcode_failure_is_surfaced():
 def test_dns_answer_count_is_read_from_the_header():
     response = b"\xab\xcd" + b"\x81\x80" + b"\x00\x01" + b"\x00\x02" + b"\x00\x00\x00\x00"
     assert torpath.dns_answer_count(response) == 2
+
+
+@pytest.mark.parametrize("header,reason", [
+    (b"\xab\xcd\x01\x00\x00\x01\x00\x01\x00\x00\x00\x00", "header"),
+    (b"\xab\xcd\x83\x80\x00\x01\x00\x01\x00\x00\x00\x00", "truncated"),
+    (b"\xab\xcd\x81\x80\x00\x00\x00\x01\x00\x00\x00\x00", "header"),
+])
+def test_invalid_dns_reply_header_is_not_a_resolution_success(header, reason):
+    with pytest.raises(TorPathError, match=reason):
+        torpath.dns_answer_count(header)
+
+
+def test_dns_reply_must_match_the_query_id():
+    response = b"\xab\xcd\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00"
+    with pytest.raises(TorPathError, match="transaction ID"):
+        torpath.dns_answer_count(response, transaction_id=0x1234)
+
+
+@pytest.mark.parametrize("matching_id", [True, False])
+def test_dns_query_and_reply_are_correlated_over_a_real_local_socket(matching_id):
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.settimeout(2.0)
+
+    def answer():
+        query, peer = listener.recvfrom(4096)
+        identifier = query[:2] if matching_id else bytes([query[0] ^ 0xFF, query[1]])
+        header = identifier + b"\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00"
+        record = b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\xc0\x00\x02\x01"
+        listener.sendto(header + query[12:] + record, peer)
+
+    thread = threading.Thread(target=answer, daemon=True)
+    thread.start()
+    try:
+        port = listener.getsockname()[1]
+        if matching_id:
+            assert torpath.resolve_via_tor_dns("example.com", port, timeout=2.0) == 1
+        else:
+            with pytest.raises(TorPathError, match="transaction ID"):
+                torpath.resolve_via_tor_dns("example.com", port, timeout=2.0)
+    finally:
+        thread.join(timeout=3.0)
+        listener.close()
 
 
 def test_tor_dns_proof_is_not_claimed_to_prevent_direct_dns():

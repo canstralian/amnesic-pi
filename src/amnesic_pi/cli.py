@@ -20,7 +20,7 @@ from pathlib import Path
 
 from . import aptsources
 from .anon import cmd_randomize_mac, cmd_verify_tor_path, cmd_verify_zero_ip
-from .clihelp import add_common, authority_for, load_config, report, require_root
+from .clihelp import add_common, authority_for, dispatch, load_config, report, require_root
 from .firewall import FirewallError, render_file, tor_uid
 from .fw import cmd_apply, cmd_lockdown, cmd_verify
 from .verify import verify as verify_posture
@@ -142,7 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    return dispatch(args, contain_on_interrupt=args.func in {
+        cmd_apply, cmd_lockdown, cmd_randomize_mac,
+    })
 
 
 if __name__ == "__main__":

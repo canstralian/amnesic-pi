@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SYSFS_NET = Path("/sys/class/net")
+COMMAND_TIMEOUT_SECONDS = 10.0
 
 _MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
 _PERMADDR_RE = re.compile(r"\bpermaddr\s+((?:[0-9a-f]{2}:){5}[0-9a-f]{2})\b", re.IGNORECASE)
@@ -35,7 +36,15 @@ class Runner:
     def default() -> Runner:
         def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
             try:
-                return subprocess.run(list(argv), text=True, capture_output=True, check=False)
+                return subprocess.run(
+                    list(argv), text=True, capture_output=True, check=False,
+                    timeout=COMMAND_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                return subprocess.CompletedProcess(
+                    args=list(argv), returncode=124, stdout="",
+                    stderr=f"{argv[0]} timed out after {COMMAND_TIMEOUT_SECONDS:g}s",
+                )
             except OSError as exc:
                 # A missing or unexecutable binary must look like a failed
                 # command, not an exception. Callers decide what a failure

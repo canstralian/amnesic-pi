@@ -57,6 +57,8 @@ class Config:
         for label, value in (("UPLINK_IF", self.uplink_if), ("CLIENT_IF", self.client_if)):
             if not _IFACE_RE.fullmatch(value):
                 raise ConfigError(f"{label} is not a valid Linux interface name: {value!r}")
+            if value == "lo":
+                raise ConfigError(f"{label} cannot use the loopback interface")
         if self.uplink_if == self.client_if:
             raise ConfigError("UPLINK_IF and CLIENT_IF must be different interfaces")
         for label, value in (
@@ -75,6 +77,8 @@ class Config:
         for name in self.mac_ifaces:
             if not _IFACE_RE.fullmatch(name):
                 raise ConfigError(f"MAC_IFACES contains an invalid interface name: {name!r}")
+            if name == "lo":
+                raise ConfigError("MAC_IFACES cannot include the loopback interface")
         if len(set(self.mac_ifaces)) != len(self.mac_ifaces):
             raise ConfigError("MAC_IFACES contains duplicate interface names")
         if self.mac_ifaces:

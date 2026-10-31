@@ -14,8 +14,9 @@ from .authority import (
     lockdown,
     lockdown_succeeded,
 )
-from .clihelp import add_common, authority_for, report, require_root
+from .clihelp import add_common, authority_for, dispatch, report, require_root
 from .nft import Nft
+from .shutdown import shutdown_signals
 from .sysctl import Sysctl
 
 # What to tell an operator about the appliance's state after a failed apply.
@@ -48,9 +49,23 @@ def cmd_apply(args: argparse.Namespace) -> int:
         return 1
     # The transaction reported success. Exit zero only if the live posture
     # still agrees -- a final report nobody acts on is not verification.
-    if not report(authority.verify()):
+    try:
+        verified = report(authority.verify())
+    except Exception as exc:
+        print(f"live posture could not be verified: {exc}", file=sys.stderr)
+        verified = False
+    if not verified:
+        with shutdown_signals(ignore=True):
+            try:
+                cleanup = authority.lockdown()
+                contained = lockdown_succeeded(cleanup)
+                report(cleanup, stream=sys.stderr)
+            except Exception as exc:
+                contained = False
+                print(f"lockdown could not complete: {exc}", file=sys.stderr)
         print(
-            "firewall apply completed but the live posture failed verification",
+            "firewall apply completed but the live posture failed verification; "
+            + ("appliance locked down" if contained else "lockdown incomplete, posture unproven"),
             file=sys.stderr,
         )
         return 1
@@ -105,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    return dispatch(args, contain_on_interrupt=args.func in {cmd_apply, cmd_lockdown})
 
 
 if __name__ == "__main__":

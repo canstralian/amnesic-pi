@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
-from .authority import DEFAULT_TEMPLATE, Authority
+from .authority import DEFAULT_TEMPLATE, Authority, lockdown
 from .config import Config, ConfigError, load_env
+from .nft import Nft
+from .shutdown import shutdown_signals
+from .sysctl import Sysctl
 
 DEFAULT_CONFIG = Path("/etc/amnesic-pi/network.env")
 
@@ -62,3 +66,24 @@ def report(checks: Sequence[Reportable], stream=None) -> bool:
 def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE)
+
+
+def dispatch(args: argparse.Namespace, *, contain_on_interrupt: bool = False) -> int:
+    """Handle cancellation without mutating read-only verification commands."""
+    with shutdown_signals():
+        try:
+            return args.func(args)
+        except KeyboardInterrupt as exc:
+            signum = getattr(exc, "signum", signal.SIGINT)
+            print(f"interrupted by {signal.Signals(signum).name}", file=sys.stderr)
+            if contain_on_interrupt:
+                with shutdown_signals(ignore=True):
+                    if os.geteuid() != 0:
+                        print("containment unverified: lockdown requires root", file=sys.stderr)
+                    else:
+                        try:
+                            checks = lockdown(Nft.default(), Sysctl())
+                            report(checks, stream=sys.stderr)
+                        except Exception as cleanup_exc:
+                            print(f"containment unverified: {cleanup_exc}", file=sys.stderr)
+            return 128 + signum

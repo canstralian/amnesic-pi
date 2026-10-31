@@ -61,9 +61,11 @@ class Sysctl:
         path = self.root / knob
         try:
             path.write_text(f"{value}\n", encoding="utf-8")
-        except OSError as exc:
-            if knob in self.optional and not path.exists():
+        except FileNotFoundError as exc:
+            if knob in self.optional:
                 return
+            raise SysctlError(f"cannot write {knob}={value}: {exc}") from exc
+        except OSError as exc:
             raise SysctlError(f"cannot write {knob}={value}: {exc}") from exc
 
     def disable_forwarding(self) -> list[str]:

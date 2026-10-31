@@ -491,6 +491,27 @@ sudo systemctl is-active amnesic-pi-posture.service
 Confirm the third command prints `active`, not just that the second one ran.
 Keep a local console.
 
+### Interrupted activation and deliberate shutdown
+
+Ctrl-C or SIGTERM during `apply`, `lockdown` or `randomize-mac` attempts
+configuration-free containment before returning exit status 130 or 143. An
+unreadable posture or a failed cleanup is reported explicitly; inspect the
+report instead of assuming a nonzero exit proves the deny posture was installed.
+Verification commands stay read-only on cancellation. Under systemd their
+existing `OnFailure=` path performs containment.
+
+From a local console, stop authority before an intentional shutdown:
+
+```bash
+sudo systemctl stop amnesic-pi-firewall.service
+sudo amnesic-pi-firewall lockdown
+```
+
+The service stop tears down bound consumers. The explicit, idempotent lockdown
+also handles a unit already inactive after an earlier failure. Confirm its
+report succeeds before powering off. Recovery uses the sequence above; there
+is no fallback that opens ordinary forwarding or bypasses Tor.
+
 ---
 
 ## 16. Enable the boot sequence
