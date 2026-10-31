@@ -181,6 +181,27 @@ def build_dns_query(name: str, transaction_id: int = 0x1337) -> bytes:
     return header + question + b"\x00" + struct.pack("!HH", 1, 1)
 
 
+def _dns_name_length(data: bytes, offset: int) -> int:
+    """Bytes a DNS name at `offset` occupies in the message, compression included.
+
+    Does not resolve a compression pointer's target -- only how many bytes
+    the name occupies at THIS position, which is all a bounds-checked walk
+    over the surrounding record needs.
+    """
+    start = offset
+    while True:
+        if offset >= len(data):
+            raise TorPathError("DNS response is truncated")
+        length = data[offset]
+        if length == 0:
+            return offset + 1 - start
+        if length & 0xC0 == 0xC0:
+            if offset + 1 >= len(data):
+                raise TorPathError("DNS response is truncated")
+            return offset + 2 - start
+        offset += 1 + length
+
+
 def dns_answer_count(response: bytes, transaction_id: int | None = None) -> int:
     if len(response) < 12:
         raise TorPathError("DNS response is truncated")
@@ -194,7 +215,33 @@ def dns_answer_count(response: bytes, transaction_id: int | None = None) -> int:
     rcode = flags & 0x0F
     if rcode != 0:
         raise TorPathError(f"DNS response carried rcode {rcode}")
-    return ancount
+
+    # `ancount` is the server's claim. Trusting it without reading the actual
+    # answer section would let a header claiming answers it never sent make
+    # `Tor DNSPort resolves` report PASS. Walk the question section first --
+    # its name and 4-byte QTYPE/QCLASS must be skipped correctly or the
+    # answer section is read from the wrong offset -- then count only the
+    # answer records that are actually, completely present.
+    offset = 12
+    for _ in range(questions):
+        offset += _dns_name_length(response, offset)
+        offset += 4  # QTYPE + QCLASS
+        if offset > len(response):
+            raise TorPathError("DNS response is truncated")
+
+    complete_answers = 0
+    for _ in range(ancount):
+        if offset >= len(response):
+            break
+        offset += _dns_name_length(response, offset)
+        if offset + 10 > len(response):
+            break
+        rdlength = struct.unpack("!H", response[offset + 8 : offset + 10])[0]
+        offset += 10 + rdlength
+        if offset > len(response):
+            break
+        complete_answers += 1
+    return complete_answers
 
 
 def resolve_via_tor_dns(name: str, port: int, host: str = "127.0.0.1", timeout: float = 20.0) -> int:
@@ -262,7 +309,21 @@ def observe_external_address(
             chunks.append(chunk)
     finally:
         sock.close()
-    body = b"".join(chunks).split(b"\r\n\r\n", 1)[-1].decode("utf-8", "replace").strip()
+    response = b"".join(chunks)
+    head, separator, payload = response.partition(b"\r\n\r\n")
+    if not separator:
+        # No header/body boundary at all: not a complete HTTP response, so
+        # there is nothing here to trust as an address observation.
+        return None
+    status_line = head.split(b"\r\n", 1)[0].split(b" ", 2)
+    if len(status_line) < 2 or not status_line[0].startswith(b"HTTP/") or status_line[1] != b"200":
+        # A non-2xx response (or one that isn't HTTP at all) is not this
+        # appliance's own exit address -- it is an error page, a captive
+        # portal, or garbage, and scanning it for an IP-shaped token risks
+        # either a false PASS under --require-observation or a false leak
+        # report if the error page happens to echo an unrelated address.
+        return None
+    body = payload.decode("utf-8", "replace").strip()
     for token in body.replace(",", " ").split():
         try:
             return str(ipaddress.ip_address(token.strip()))

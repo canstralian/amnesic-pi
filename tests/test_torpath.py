@@ -57,6 +57,47 @@ def build_authority(tmp_path: Path, uplink_addresses: list[str] | None = None) -
     )
 
 
+# -- observe_external_address parses only a real HTTP response ------------
+
+
+def _connected_to(response: bytes):
+    """A `connect` stand-in whose socket already has `response` queued to read."""
+    client, server = socket.socketpair()
+    server.sendall(response)
+    server.shutdown(socket.SHUT_WR)
+    connect = lambda *args, **kwargs: client  # noqa: E731
+    connect.server = server  # keep the peer alive, or `client`'s writes break
+    return connect
+
+
+def test_observe_external_address_parses_a_valid_200_response():
+    config = Config("eth0", "eth1", egress_echo_host="echo.example")
+    connect = _connected_to(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n203.0.113.9")
+    assert torpath.observe_external_address(config, timeout=2.0, connect=connect) == "203.0.113.9"
+
+
+def test_observe_external_address_rejects_a_non_2xx_response():
+    """An error page is not this appliance's exit address.
+
+    Without a status check, an incidental IP-shaped token inside an error
+    page's body would be accepted as the observation -- a false PASS under
+    `--require-observation`, or a false leak report if the token happened to
+    match one of this appliance's own addresses.
+    """
+    config = Config("eth0", "eth1", egress_echo_host="echo.example")
+    connect = _connected_to(
+        b"HTTP/1.1 500 Internal Server Error\r\n\r\nupstream 203.0.113.9 unreachable"
+    )
+    assert torpath.observe_external_address(config, timeout=2.0, connect=connect) is None
+
+
+def test_observe_external_address_rejects_a_response_with_no_header_separator():
+    """A response that never reaches a blank line is not a complete HTTP reply."""
+    config = Config("eth0", "eth1", egress_echo_host="echo.example")
+    connect = _connected_to(b"203.0.113.9")
+    assert torpath.observe_external_address(config, timeout=2.0, connect=connect) is None
+
+
 # -- hard gates versus telemetry -------------------------------------------
 
 
@@ -343,12 +384,17 @@ class _FragmentingSocksServer:
     def _serve(self) -> None:
         conn, _ = self.listener.accept()
         with conn:
-            conn.recv(3)  # greeting: VER, NMETHODS, METHODS
+            # A short read here is routine TCP, the same as the fragmented
+            # reply this fixture exists to test -- not just on the client
+            # side. `recv(5)` followed by indexing `header[4]` could raise
+            # IndexError in this thread on a short read, which this test
+            # would see only as the client hanging until its own timeout.
+            torpath._recv_exact(conn, 3)  # greeting: VER, NMETHODS, METHODS
             self._send_byte_by_byte(conn, bytes([SOCKS5_VERSION, SOCKS5_NO_AUTH]))
 
-            header = conn.recv(5)  # VER, CMD, RSV, ATYP, length-or-first-octet
+            header = torpath._recv_exact(conn, 5)  # VER, CMD, RSV, ATYP, length-or-first-octet
             domain_len = header[4]
-            conn.recv(domain_len + 2)  # rest of the domain name + port
+            torpath._recv_exact(conn, domain_len + 2)  # rest of the domain name + port
 
             reply = bytes([SOCKS5_VERSION, SOCKS5_SUCCEEDED, 0x00, self.atyp])
             reply += self.bound_field
@@ -426,9 +472,39 @@ def test_dns_rcode_failure_is_surfaced():
         torpath.dns_answer_count(response)
 
 
-def test_dns_answer_count_is_read_from_the_header():
-    response = b"\xab\xcd" + b"\x81\x80" + b"\x00\x01" + b"\x00\x02" + b"\x00\x00\x00\x00"
+# A question for "example.com" (QNAME + QTYPE A + QCLASS IN), and one answer
+# record naming it via a compression pointer back to offset 12.
+_DNS_QUESTION = b"\x07example\x03com\x00" + b"\x00\x01\x00\x01"
+_DNS_ANSWER_RECORD = (
+    b"\xc0\x0c" + b"\x00\x01\x00\x01" + b"\x00\x00\x00\x3c" + b"\x00\x04" + b"\xc0\x00\x02\x01"
+)
+
+
+def test_dns_answer_count_counts_actual_answer_records():
+    header = b"\xab\xcd" + b"\x81\x80" + b"\x00\x01" + b"\x00\x02" + b"\x00\x00\x00\x00"
+    response = header + _DNS_QUESTION + _DNS_ANSWER_RECORD * 2
     assert torpath.dns_answer_count(response) == 2
+
+
+def test_dns_answer_count_does_not_trust_a_header_claiming_answers_it_never_sent():
+    """`ancount` is the server's claim, not proof.
+
+    A response whose header says `ancount=2` but whose body ends right after
+    the question section -- no answer bytes at all -- must not report 2
+    answers. Trusting the header here is exactly the gap that let
+    `Tor DNSPort resolves` report PASS without Tor's resolver having
+    returned anything.
+    """
+    header = b"\xab\xcd" + b"\x81\x80" + b"\x00\x01" + b"\x00\x02" + b"\x00\x00\x00\x00"
+    response = header + _DNS_QUESTION
+    assert torpath.dns_answer_count(response) == 0
+
+
+def test_dns_answer_count_stops_at_the_last_complete_record():
+    """A header overclaiming by one record is caught, not merely zeroed out."""
+    header = b"\xab\xcd" + b"\x81\x80" + b"\x00\x01" + b"\x00\x02" + b"\x00\x00\x00\x00"
+    response = header + _DNS_QUESTION + _DNS_ANSWER_RECORD  # ancount=2, only 1 shipped
+    assert torpath.dns_answer_count(response) == 1
 
 
 @pytest.mark.parametrize("header,reason", [
