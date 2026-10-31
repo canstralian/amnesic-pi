@@ -263,7 +263,6 @@ class Topology:
             self.gateway_ns,
             ["setpriv", "--reuid", user, "--regid", "nogroup", "--clear-groups",
              "python3", "-c", script],
-            check=False,
         )
 
     def client_sends(self, port: int = 443, attempts: int = 3) -> None:
