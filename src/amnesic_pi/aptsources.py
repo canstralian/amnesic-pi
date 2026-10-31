@@ -32,6 +32,11 @@ _NETWORK_URI = re.compile(r"\b(?:tor\+)?https?://")
 _LIST_LINE = re.compile(r"^(\s*deb(?:-src)?\s+(?:\[[^\]]*\]\s+)?)(\S+)(.*)$")
 # deb822 format: "URIs: one or more space-separated URIs".
 _URIS_FIELD = re.compile(r"^(\s*URIs:\s*)(.*)$", re.IGNORECASE)
+# Deb822 (RFC822-style) field folding: a continuation line is any line that
+# starts with horizontal whitespace. apt reads a folded value as part of the
+# field it continues; a parser that only looks at the "URIs:" line itself
+# would miss any URI apt still fetches directly.
+_CONTINUATION_LINE = re.compile(r"^[ \t]")
 
 
 @dataclass(frozen=True)
@@ -61,13 +66,25 @@ def torify_list(text: str) -> str:
 
 def torify_deb822(text: str) -> str:
     out = []
+    in_uris = False
     for line in text.splitlines(keepends=True):
         body = line.rstrip("\n")
+        ending = line[len(body) :]
+        if body.lstrip().startswith("#"):
+            out.append(line)
+            continue
         match = _URIS_FIELD.match(body)
         if match:
             uris = " ".join(torify_uri(uri) for uri in match.group(2).split())
             body = match.group(1) + uris
-        out.append(body + line[len(line.rstrip("\n")) :])
+            in_uris = True
+        elif in_uris and body.strip() and _CONTINUATION_LINE.match(body):
+            leading = body[: len(body) - len(body.lstrip())]
+            uris = " ".join(torify_uri(uri) for uri in body.split())
+            body = leading + uris
+        else:
+            in_uris = False
+        out.append(body + ending)
     return "".join(out)
 
 
@@ -93,6 +110,7 @@ def source_files(apt_root: Path) -> list[SourceFile]:
 
 def _uris(source: SourceFile, text: str) -> list[str]:
     uris: list[str] = []
+    in_uris = False
     for line in text.splitlines():
         if line.lstrip().startswith("#"):
             continue
@@ -100,11 +118,31 @@ def _uris(source: SourceFile, text: str) -> list[str]:
             match = _URIS_FIELD.match(line)
             if match:
                 uris.extend(match.group(2).split())
+                in_uris = True
+            elif in_uris and line.strip() and _CONTINUATION_LINE.match(line):
+                uris.extend(line.split())
+            else:
+                in_uris = False
         else:
             match = _LIST_LINE.match(line)
             if match:
                 uris.append(match.group(2))
     return uris
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write `text` to `path` without a window where it is truncated.
+
+    `Path.write_text` opens its target with truncation before writing a byte;
+    if provisioning is interrupted (disk full, process killed) partway through,
+    the source file is left shorter than either the old or the new content,
+    and the already-made backup does nothing to restore it. Writing to a
+    sibling temp file and renaming it into place is a single filesystem
+    operation: whichever content wins, the file is never observed half-written.
+    """
+    tmp = path.with_name(path.name + ".amnesic-pi.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
 
 
 def proxy_conf(socks_port: int) -> str:
@@ -132,12 +170,12 @@ def torify(apt_root: Path, socks_port: int, backup_dir: Path = BACKUP_DIR) -> li
         if not backup.exists():
             backup.parent.mkdir(parents=True, exist_ok=True)
             backup.write_text(original, encoding="utf-8")
-        source.path.write_text(rewritten, encoding="utf-8")
+        _write_atomic(source.path, rewritten)
         checks.append(Check(f"torify {source.path.name}", True, f"rewritten; original at {backup}"))
 
     conf = apt_root / PROXY_CONF
     conf.parent.mkdir(parents=True, exist_ok=True)
-    conf.write_text(proxy_conf(socks_port), encoding="utf-8")
+    _write_atomic(conf, proxy_conf(socks_port))
     checks.append(Check("apt Tor proxy", True, str(conf)))
     return checks + verify(apt_root, socks_port)
 
@@ -150,7 +188,11 @@ def verify(apt_root: Path, socks_port: int) -> list[Check]:
         checks.append(Check("apt sources", False, f"no source files under {apt_root}"))
     for source in files:
         uris = _uris(source, source.path.read_text(encoding="utf-8"))
-        direct = [uri for uri in uris if _NETWORK_URI.match(uri) and not uri.startswith("tor+")]
+        direct = [
+            uri
+            for uri in uris
+            if _NETWORK_URI.match(uri) and not uri.startswith("tor+https://")
+        ]
         checks.append(
             Check(
                 f"{source.path.name} is Tor-only",

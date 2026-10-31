@@ -31,6 +31,18 @@ Components: main contrib non-free non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp
 """
 
+# A deb822 stanza with the URIs field folded onto an indented continuation
+# line, exactly as apt's own writers and admins hand-editing a .sources file
+# may produce. apt reads a folded value as one logical field.
+DEB822_FOLDED = """\
+Types: deb
+URIs: http://deb.debian.org/debian/
+ http://second.example/debian/
+Suites: trixie
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp
+"""
+
 
 def tree(tmp_path: Path) -> Path:
     apt = tmp_path / "apt"
@@ -72,6 +84,30 @@ def test_deb822_rewrites_every_uri_in_the_field():
     assert "Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp" in out
 
 
+def test_deb822_rewrites_a_uri_folded_onto_a_continuation_line():
+    """A URI apt. reads from a folded continuation line must not stay direct.
+
+    `torify_deb822` previously matched only the literal `URIs:` line; a value
+    folded onto the next (indented) line was left completely untouched --
+    apt still fetches it directly, and the firewall blocks it.
+    """
+    out = torify_deb822(DEB822_FOLDED)
+    assert "URIs: tor+https://deb.debian.org/debian/" in out
+    assert " tor+https://second.example/debian/" in out
+    assert "http://second.example" not in out
+    assert "Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp" in out
+
+
+def test_verify_sees_a_uri_folded_onto_a_continuation_line(tmp_path: Path):
+    """`verify` must inspect a folded URI, not only the one on the `URIs:` line."""
+    apt = tmp_path / "apt"
+    (apt / "sources.list.d").mkdir(parents=True)
+    (apt / "sources.list.d" / "folded.sources").write_text(DEB822_FOLDED)
+    failed = {c.name: c.detail for c in verify(apt, 9050) if not c.ok}
+    assert "folded.sources is Tor-only" in failed
+    assert "second.example" in failed["folded.sources is Tor-only"]
+
+
 def test_torify_leaves_no_direct_source_and_points_apt_at_tor(tmp_path: Path):
     apt = tree(tmp_path)
     checks = torify(apt, 9050, backup_dir=tmp_path / "orig")
@@ -109,3 +145,44 @@ def test_verify_flags_a_proxy_on_the_wrong_port(tmp_path: Path):
 def test_verify_fails_when_there_are_no_sources(tmp_path: Path):
     (tmp_path / "apt").mkdir()
     assert not all(c.ok for c in verify(tmp_path / "apt", 9050))
+
+
+def test_verify_rejects_a_tor_http_source(tmp_path: Path):
+    """`tor+http://` is still cleartext to the exit relay -- not Tor-only.
+
+    `verify` previously excluded anything starting with `tor+`, so a source
+    this module never wrote -- hand-edited, or added by something else --
+    could sit at `tor+http://` and pass as though it were `tor+https://`,
+    exposing every package request's content to the exit relay.
+    """
+    apt = tmp_path / "apt"
+    apt.mkdir()
+    (apt / "sources.list").write_text("deb tor+http://deb.debian.org/debian bookworm main\n")
+    failed = {c.name: c.detail for c in verify(apt, 9050) if not c.ok}
+    assert "sources.list is Tor-only" in failed
+    assert "tor+http://deb.debian.org/debian" in failed["sources.list is Tor-only"]
+
+
+def test_torify_write_failure_leaves_the_original_source_intact(tmp_path: Path, monkeypatch):
+    """A write that fails partway must not leave the source file truncated.
+
+    `Path.write_text` truncates its target before writing a byte. If the
+    write is interrupted, the file is left shorter than either the old or
+    the new content, and the backup this function already made does nothing
+    to restore it automatically. Writing the replacement to a sibling temp
+    file and renaming it into place means a failure here never touches the
+    real path at all.
+    """
+    apt = tree(tmp_path)
+    original = (apt / "sources.list").read_text()
+    real_write_text = Path.write_text
+
+    def flaky_write_text(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name.endswith(".amnesic-pi.tmp"):
+            raise OSError("disk full")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", flaky_write_text)
+    with pytest.raises(OSError):
+        torify(apt, 9050, backup_dir=tmp_path / "orig")
+    assert (apt / "sources.list").read_text() == original
