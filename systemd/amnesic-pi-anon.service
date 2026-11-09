@@ -1,0 +1,41 @@
+[Unit]
+Description=Amnesic Pi pre-network anonymity hardening
+Documentation=file:/usr/share/doc/amnesic-pi/boot-chain.md
+DefaultDependencies=no
+
+# Runs before anything may configure or use a network interface.
+Wants=network-pre.target
+Before=network-pre.target
+Before=amnesic-pi-firewall.service
+
+# Optimistic ordering hints for the reference two-interface topology. These are
+# Wants=, not Requires=: a missing device must not deadlock the boot. The real
+# interface requirement is enforced by randomize-mac itself, which reads the
+# configured names from network.env and fails closed if they never appear.
+After=sys-subsystem-net-devices-eth0.device
+After=sys-subsystem-net-devices-eth1.device
+Wants=sys-subsystem-net-devices-eth0.device
+Wants=sys-subsystem-net-devices-eth1.device
+
+Conflicts=shutdown.target
+Before=shutdown.target
+
+# A failed anonymity stage must not leave a forwarding-capable appliance.
+OnFailure=amnesic-pi-lockdown.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/amnesic-pi/network.env
+
+# MAC readback verification is folded into randomize-mac: the command does not
+# return success unless the kernel reports the address this process generated.
+ExecStart=/usr/local/bin/amnesic-pi-anon randomize-mac
+ExecStart=/usr/local/bin/amnesic-pi-anon verify-zero-ip
+
+# No Tor-dependent verification runs here. Tor does not exist yet at this point
+# in the boot, and it must not: Tor is gated on the firewall, which is gated on
+# this unit.
+
+[Install]
+WantedBy=sysinit.target

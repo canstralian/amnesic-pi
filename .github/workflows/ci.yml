@@ -29,4 +29,52 @@ jobs:
           bash -n image/provision.sh
           bash -n scripts/check-amnesia.sh
           bash -n tests/integration/fail_closed.sh
-          sh -n bin/amnesic-pi-firewall
+
+  # Packet-level proof that no pre-ready failure path can forward clearnet
+  # traffic. Kept as a separate job because it needs root, iproute2 and nft,
+  # and because a green unit-test run must not be mistaken for this evidence.
+  fail-closed-namespace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install namespace tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends iproute2 nftables
+      - name: Install dev tools
+        run: python -m pip install -e . pytest
+      - name: Confirm the runner can actually run them
+        # These tests skip when namespaces are unavailable. A skip here would
+        # look like a pass, so the precondition is asserted separately: this
+        # job goes red rather than quietly dropping the strongest evidence.
+        run: |
+          sudo -E env "PATH=$PATH" python -c "
+          import sys
+          sys.path.insert(0, 'tests')
+          import netns
+          ok, reason = netns.available()
+          if not ok:
+              raise SystemExit(f'namespace fail-closed tests cannot run here: {reason}')
+          print('network namespaces available')
+          "
+      - name: Namespace fail-closed suite
+        run: |
+          sudo -E env "PATH=$PATH" python -m pytest -q -m netns \
+            --no-header -p no:cacheprovider
+
+  systemd-graph:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dev tools
+        run: python -m pip install -e . pytest
+      - name: Resolved systemd dependency graph
+        run: python -m pytest -q tests/test_systemd.py
+      - name: systemd-analyze verify
+        run: systemd-analyze --version && python -m pytest -q tests/test_systemd.py -k analyze

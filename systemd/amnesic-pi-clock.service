@@ -1,0 +1,29 @@
+[Unit]
+Description=Amnesic Pi clock correction from the Tor consensus (forward-only)
+Documentation=file:/usr/share/doc/amnesic-pi/boot-chain.md
+
+# Reads the consensus Tor fetched this boot; sends nothing itself. Wants=, not
+# Requires=: this unit restarts Tor after moving the clock, and a Requires=
+# edge would propagate that restart back onto this unit while it runs.
+Wants=tor@default.service
+After=tor@default.service
+
+# A clock corrected under a policy that has since gone is moot; stop with it.
+BindsTo=amnesic-pi-firewall.service
+After=amnesic-pi-firewall.service
+
+# The posture gate judges the Tor path on the corrected clock.
+Before=amnesic-pi-posture.service
+
+# No OnFailure= lockdown: this is not an authority gate. A clock it could not
+# fix leaves Tor unbootstrapped, which amnesic-pi-posture.service detects and
+# locks down on.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/amnesic-pi/network.env
+ExecStart=/usr/local/bin/amnesic-pi-anon sync-clock
+
+[Install]
+WantedBy=multi-user.target
