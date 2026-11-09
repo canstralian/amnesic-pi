@@ -12,7 +12,10 @@ unable to forward.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import fcntl
+import os
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +47,7 @@ from .sysctl import (
 )
 
 DEFAULT_TEMPLATE = Path("/usr/share/amnesic-pi/policy.nft.in")
+AUTHORITY_LOCK = Path("/run/lock/amnesic-pi-authority.lock")
 
 # The nftables shape the appliance's security claims rest on. `verify` proves
 # the live kernel state matches this, not that a file on disk says so.
@@ -112,6 +116,33 @@ class Check:
     detail: str
 
 
+@contextmanager
+def _authority_transaction() -> Iterator[None]:
+    try:
+        fd = os.open(
+            AUTHORITY_LOCK,
+            os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+    except OSError as exc:
+        raise AuthorityError(
+            f"cannot open authority transaction lock: {exc}",
+            containment=CONTAINMENT_PRESERVED,
+        ) from exc
+
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            raise AuthorityError(
+                f"cannot acquire authority transaction lock: {exc}",
+                containment=CONTAINMENT_PRESERVED,
+            ) from exc
+        yield
+    finally:
+        os.close(fd)
+
+
 def lockdown(nft: Nft, sysctl: Sysctl) -> list[Check]:
     """Fail-safe, idempotent teardown. Requires no configuration at all.
 
@@ -126,6 +157,14 @@ def lockdown(nft: Nft, sysctl: Sysctl) -> list[Check]:
     cannot leave the appliance forwarding clearnet traffic. Safe after a
     partial apply and safe to run repeatedly.
     """
+    try:
+        with _authority_transaction():
+            return _lockdown(nft, sysctl)
+    except AuthorityError as exc:
+        return [Check("authority transaction lock", False, str(exc))]
+
+
+def _lockdown(nft: Nft, sysctl: Sysctl) -> list[Check]:
     checks: list[Check] = []
 
     failed = sysctl.disable_forwarding()
@@ -276,6 +315,10 @@ class Authority:
         must not claim containment for it), otherwise whether the lockdown that
         ran to contain the failure verified or was left incomplete.
         """
+        with _authority_transaction():
+            self._apply_locked()
+
+    def _apply_locked(self) -> None:
         # Render before touching the kernel: a configuration or template error
         # must not disturb a known-good ruleset.
         try:
@@ -334,7 +377,7 @@ class Authority:
             # cancellation after cleanup so CLI exit semantics remain truthful.
             with shutdown_signals(ignore=True):
                 try:
-                    cleanup = self.lockdown()
+                    cleanup = _lockdown(self.nft, self.sysctl)
                 except Exception as cleanup_exc:
                     cleanup = [Check("lockdown completed", False, str(cleanup_exc))]
             unmet = [check for check in cleanup if not check.ok]

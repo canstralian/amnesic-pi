@@ -9,6 +9,7 @@ leaves forwarding off.
 from __future__ import annotations
 
 import argparse
+import multiprocessing
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,6 +90,69 @@ def test_apply_is_idempotent(tmp_path: Path):
     harness.authority.apply()
     harness.authority.apply()
     assert all(check.ok for check in harness.authority.verify())
+
+
+def test_apply_and_lockdown_are_serialized_across_processes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from amnesic_pi import authority as authority_module
+
+    monkeypatch.setattr(authority_module, "AUTHORITY_LOCK", tmp_path / "authority.lock")
+    context = multiprocessing.get_context("fork")
+    apply_entered = context.Event()
+    release_apply = context.Event()
+    lockdown_attempted = context.Event()
+    lockdown_entered = context.Event()
+    harness = build(tmp_path)
+    install = harness.authority._install
+
+    def pause_install(rendered: str) -> None:
+        apply_entered.set()
+        if not release_apply.wait(timeout=5):
+            raise RuntimeError("timed out waiting to release apply")
+        install(rendered)
+
+    object.__setattr__(harness.authority, "_install", pause_install)
+
+    def run_apply() -> None:
+        harness.authority.apply()
+
+    def run_lockdown() -> None:
+        disable_forwarding = harness.authority.sysctl.disable_forwarding
+
+        def mark_lockdown_entry() -> list[str]:
+            lockdown_entered.set()
+            return disable_forwarding()
+
+        object.__setattr__(harness.authority.sysctl, "disable_forwarding", mark_lockdown_entry)
+        lockdown_attempted.set()
+        checks = harness.authority.lockdown()
+        if not all(check.ok for check in checks):
+            raise RuntimeError(f"lockdown failed: {checks}")
+
+    apply_process = context.Process(target=run_apply)
+    lockdown_process = context.Process(target=run_lockdown)
+    apply_process.start()
+    try:
+        assert apply_entered.wait(timeout=5)
+        lockdown_process.start()
+        assert lockdown_attempted.wait(timeout=5)
+        assert not lockdown_entered.wait(timeout=0.2), (
+            "lockdown entered its transaction while apply was still installing policy"
+        )
+    finally:
+        release_apply.set()
+        for process in (apply_process, lockdown_process):
+            if process.pid is None:
+                continue
+            process.join(timeout=5)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+    assert apply_process.exitcode == 0
+    assert lockdown_process.exitcode == 0
+    assert lockdown_entered.is_set()
+    assert harness.forwarding[IPV4_FORWARD] == "0"
 
 
 def test_ipv6_forwarding_is_never_granted(tmp_path: Path):
