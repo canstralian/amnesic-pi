@@ -27,6 +27,7 @@ READY = "amnesic-pi-ready.target"
 TOR = "tor@default.service"
 NETWORKD = "systemd-networkd.service"
 NETWORKMANAGER = "NetworkManager.service"
+DHCPCD = "dhcpcd.service"
 
 NETWORK_MANAGERS = (NETWORKD, NETWORKMANAGER)
 
@@ -61,6 +62,14 @@ def test_network_manager_ordered_after_firewall(graph: unitgraph.Graph, manager:
     assert FIREWALL in graph.after[manager]
 
 
+def test_dhcpcd_binds_to_firewall(graph: unitgraph.Graph):
+    assert FIREWALL in graph.binds_to[DHCPCD]
+
+
+def test_dhcpcd_ordered_after_firewall(graph: unitgraph.Graph):
+    assert FIREWALL in graph.after[DHCPCD]
+
+
 def test_tor_binds_to_firewall(graph: unitgraph.Graph):
     """Tor must not survive the firewall unit disappearing."""
     assert FIREWALL in graph.binds_to[TOR]
@@ -85,7 +94,9 @@ def test_reverse_edges_name_every_bound_consumer(graph: unitgraph.Graph):
     set here means adding a new network consumer without gating it is visible
     as a test failure rather than a silent omission.
     """
-    assert graph.bound_by[FIREWALL] == {NETWORKD, NETWORKMANAGER, TOR, CLOCK, POSTURE}
+    assert graph.bound_by[FIREWALL] == {
+        NETWORKD, NETWORKMANAGER, DHCPCD, TOR, CLOCK, POSTURE
+    }
     assert graph.bound_by[ANON] == {FIREWALL}
 
 
@@ -163,7 +174,7 @@ def test_ready_target_requires_every_stage(graph: unitgraph.Graph):
 
 
 def test_firewall_is_ordered_before_every_network_consumer(graph: unitgraph.Graph):
-    for consumer in (NETWORKD, NETWORKMANAGER, TOR):
+    for consumer in (DHCPCD, NETWORKD, NETWORKMANAGER, TOR):
         assert consumer in graph.before[FIREWALL]
 
 
@@ -309,6 +320,7 @@ def test_drop_ins_land_on_the_units_they_are_meant_to_gate():
     assert destinations["tor-amnesic-pi.conf"].startswith("tor@default.service.d/")
     assert destinations["networkd-amnesic-pi.conf"].startswith("systemd-networkd.service.d/")
     assert destinations["NetworkManager-amnesic-pi.conf"].startswith("NetworkManager.service.d/")
+    assert destinations["dhcpcd-amnesic-pi.conf"] == "dhcpcd.service.d/10-amnesic-pi.conf"
 
 
 # -- the resolver's own correctness ----------------------------------------

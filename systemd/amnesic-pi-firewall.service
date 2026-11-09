@@ -16,6 +16,7 @@ After=systemd-sysctl.service
 
 Wants=network-pre.target
 Before=network-pre.target
+Before=dhcpcd.service
 Before=systemd-networkd.service
 Before=NetworkManager.service
 Before=tor@default.service

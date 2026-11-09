@@ -16,3 +16,4 @@ amnesic-pi-ready.target	amnesic-pi-ready.target
 tor-amnesic-pi.conf	tor@default.service.d/10-amnesic-pi.conf
 networkd-amnesic-pi.conf	systemd-networkd.service.d/10-amnesic-pi.conf
 NetworkManager-amnesic-pi.conf	NetworkManager.service.d/10-amnesic-pi.conf
+dhcpcd-amnesic-pi.conf	dhcpcd.service.d/10-amnesic-pi.conf

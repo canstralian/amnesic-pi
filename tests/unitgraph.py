@@ -45,7 +45,12 @@ LIST_DIRECTIVES = frozenset(
 
 # Units referenced by the graph that the distribution provides. Stubs are
 # generated for them so systemd-analyze can resolve the whole graph offline.
-EXTERNAL_UNITS = ("tor@.service", "systemd-networkd.service", "NetworkManager.service")
+EXTERNAL_UNITS = (
+    "tor@.service",
+    "systemd-networkd.service",
+    "NetworkManager.service",
+    "dhcpcd.service",
+)
 
 
 def install_pairs() -> list[tuple[str, str]]:
