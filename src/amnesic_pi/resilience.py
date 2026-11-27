@@ -119,9 +119,15 @@ def verify_content(root: Path, trusted_manifest_sha256: str) -> tuple[str, ...]:
         os.close(directory)
 
 
+def _root_path(value: str) -> Path:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("path must not be empty")
+    return Path(value)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("root", type=Path)
+    parser.add_argument("root", type=_root_path)
     parser.add_argument("--manifest-sha256", required=True)
     args = parser.parse_args()
     try:

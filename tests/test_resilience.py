@@ -180,3 +180,22 @@ def test_invalid_digest(tmp_path):
     pin = write_manifest(tmp_path, [item])
     with pytest.raises(ContentError, match="file digest"):
         verify_content(tmp_path, pin)
+
+
+@pytest.mark.parametrize("value", ["", "   ", "\t\n"])
+def test_cli_rejects_blank_root(bundle, value):
+    root, pin = bundle
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+    command = [sys.executable, "-m", "amnesic_pi.resilience", value, "--manifest-sha256", pin]
+    result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 2
+    assert "argument root: path must not be empty" in result.stderr
+    assert not result.stdout
+
+
+def test_cli_accepts_explicit_current_directory(bundle):
+    root, pin = bundle
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+    command = [sys.executable, "-m", "amnesic_pi.resilience", ".", "--manifest-sha256", pin]
+    result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0 and "no activation performed" in result.stdout

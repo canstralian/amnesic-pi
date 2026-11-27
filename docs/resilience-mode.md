@@ -30,7 +30,8 @@ PYTHONPATH=src python -m amnesic_pi.resilience /path/to/curated-content \
   --manifest-sha256 "$TRUSTED_MANIFEST_SHA256"
 ```
 
-Exit 0 means all listed bytes matched; exit 1 means verification failed. Extra
+Exit 0 means all listed bytes matched; exit 1 means verification failed. Exit 2
+means invalid CLI arguments (including empty or whitespace-only root paths). Extra
 files are not verified and must never be served based on this result. There is
 no automatic activation, publishing, copying, mounting or repair. No root access
 is needed for ordinary readable files. Do not point this at an untrusted device
